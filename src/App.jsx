@@ -16,6 +16,8 @@ import {
   Archive,
   X,
   Lock,
+  Truck,
+  ArrowLeftRight,
 } from "lucide-react";
 
 const WORKERS = ["JJ", "PD Lv2", "PD Lv1", "倒模", "Lv1倒模车花"];
@@ -29,6 +31,33 @@ const OTHER_DESTINATIONS = [
   "OTHER",
 ];
 const LOSS_THRESHOLD = 1; // 克，超过这个数就标红提醒
+
+const SPECIAL_KEYS = { SHIPMENTS: "__SHIPMENTS__", TRANSFERS: "__TRANSFERS__" };
+const SHIP_CATEGORIES = ["戒指", "链", "牌", "GOLDBAR", "GOLDBEAN", "OTHER"];
+const DENOMINATIONS = [
+  { key: "0.10", label: "0.10", grams: 0.1 },
+  { key: "0.20", label: "0.20", grams: 0.2 },
+  { key: "0.50", label: "0.50", grams: 0.5 },
+  { key: "1.00", label: "1.00", grams: 1.0 },
+  { key: "half_dinar", label: "1/2 DINAR", grams: 2.125 },
+  { key: "dinar", label: "DINAR", grams: 4.25 },
+  { key: "5.00", label: "5.00", grams: 5.0 },
+  { key: "10.00", label: "10.00", grams: 10.0 },
+  { key: "20.00", label: "20.00", grams: 20.0 },
+  { key: "50.00", label: "50.00", grams: 50.0 },
+  { key: "100.00", label: "100.00", grams: 100.0 },
+];
+const TRANSFER_TYPES = ["掉色来回", "Lv1↔Lv2上下楼", "OTHER"];
+
+const emptyShipmentData = () => ({ history: [] });
+const emptyTransferData = () => ({ threshold: 0.05, history: [] });
+
+function denomTotal(qtyObj) {
+  return DENOMINATIONS.reduce(
+    (s, d) => s + (parseFloat(qtyObj[d.key] || 0) || 0) * d.grams,
+    0
+  );
+}
 
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
@@ -111,20 +140,61 @@ export default function GoldLedger() {
   const [detailError, setDetailError] = useState("");
   const [detailSaving, setDetailSaving] = useState(false);
 
+  // 页面切换：对账 / 出货记录 / 转手核对
+  const [view, setView] = useState("workers");
+
+  // 出货记录
+  const [shipmentData, setShipmentData] = useState(emptyShipmentData());
+  const [shipDate, setShipDate] = useState(todayStr());
+  const [shipCategory, setShipCategory] = useState(SHIP_CATEGORIES[0]);
+  const [shipCategoryCustom, setShipCategoryCustom] = useState("");
+  const [shipWeight, setShipWeight] = useState("");
+  const [shipItems, setShipItems] = useState([]);
+  const [shipRowError, setShipRowError] = useState("");
+  const [goldbarQty, setGoldbarQty] = useState({});
+  const [goldbeanQty, setGoldbeanQty] = useState({});
+  const [shipSaving, setShipSaving] = useState(false);
+  const [shipMsg, setShipMsg] = useState("");
+
+  // 转手核对
+  const [transferData, setTransferData] = useState(emptyTransferData());
+  const [thresholdDraft, setThresholdDraft] = useState("0.05");
+  const [transDate, setTransDate] = useState(todayStr());
+  const [transType, setTransType] = useState(TRANSFER_TYPES[0]);
+  const [transTypeCustom, setTransTypeCustom] = useState("");
+  const [transDesc, setTransDesc] = useState("");
+  const [transSent, setTransSent] = useState("");
+  const [transReceived, setTransReceived] = useState("");
+  const [transError, setTransError] = useState("");
+  const [transSaving, setTransSaving] = useState(false);
+  const [transMsg, setTransMsg] = useState("");
+
   useEffect(() => {
     let cancelled = false;
     async function load() {
+      const allKeys = [...WORKERS, SPECIAL_KEYS.SHIPMENTS, SPECIAL_KEYS.TRANSFERS];
       const { data: rows, error } = await supabase
         .from("gold_ledger")
         .select("worker, data")
-        .in("worker", WORKERS);
+        .in("worker", allKeys);
       if (error) throw error;
       const next = Object.fromEntries(WORKERS.map((w) => [w, emptyWorkerData()]));
+      let nextShipments = emptyShipmentData();
+      let nextTransfers = emptyTransferData();
       for (const row of rows || []) {
-        next[row.worker] = row.data || emptyWorkerData();
+        if (row.worker === SPECIAL_KEYS.SHIPMENTS) {
+          nextShipments = row.data || emptyShipmentData();
+        } else if (row.worker === SPECIAL_KEYS.TRANSFERS) {
+          nextTransfers = row.data || emptyTransferData();
+        } else {
+          next[row.worker] = row.data || emptyWorkerData();
+        }
       }
       if (!cancelled) {
         setData(next);
+        setShipmentData(nextShipments);
+        setTransferData(nextTransfers);
+        setThresholdDraft(String(nextTransfers.threshold ?? 0.05));
         setReady(true);
       }
     }
@@ -186,19 +256,191 @@ export default function GoldLedger() {
     }));
   }
 
-  async function persistWorker(worker, nextWorkerData) {
+  async function persistRow(key, nextData) {
     const { error } = await supabase
       .from("gold_ledger")
       .upsert(
         {
-          worker,
-          data: nextWorkerData,
+          worker: key,
+          data: nextData,
           updated_at: new Date().toISOString(),
         },
         { onConflict: "worker" }
       );
     if (error) throw error;
   }
+  const persistWorker = persistRow;
+
+  // ---- 出货记录 ----
+  function addShipItem() {
+    const cat = shipCategory === "OTHER" ? shipCategoryCustom.trim() : shipCategory;
+    const w = parseFloat(shipWeight);
+    if (!cat) {
+      setShipRowError("请填写类别");
+      return;
+    }
+    if (shipWeight === "" || Number.isNaN(w) || w <= 0) {
+      setShipRowError("请填写有效重量");
+      return;
+    }
+    setShipItems((list) => [
+      ...list,
+      { id: Date.now() + Math.random(), category: cat, weight: w },
+    ]);
+    setShipCategoryCustom("");
+    setShipWeight("");
+    setShipRowError("");
+  }
+
+  function removeShipItem(id) {
+    setShipItems((list) => list.filter((i) => i.id !== id));
+  }
+
+  async function saveShipment() {
+    setShipMsg("");
+    const goldbarTotal = denomTotal(goldbarQty);
+    const goldbeanTotal = denomTotal(goldbeanQty);
+    const hasDenom = goldbarTotal > 0 || goldbeanTotal > 0;
+    if (shipItems.length === 0 && !hasDenom) {
+      setShipMsg("请至少添加一项出货记录");
+      return;
+    }
+    setShipSaving(true);
+    const items = [...shipItems];
+    if (goldbarTotal > 0) {
+      items.push({
+        id: Date.now() + Math.random(),
+        category: "GOLDBAR",
+        weight: Math.round(goldbarTotal * 100) / 100,
+      });
+    }
+    if (goldbeanTotal > 0) {
+      items.push({
+        id: Date.now() + Math.random(),
+        category: "GOLDBEAN",
+        weight: Math.round(goldbeanTotal * 100) / 100,
+      });
+    }
+    const record = {
+      id: Date.now() + Math.random(),
+      date: shipDate,
+      items,
+      denom: { goldbar: { ...goldbarQty }, goldbean: { ...goldbeanQty } },
+    };
+    const nextData = { history: [...shipmentData.history, record] };
+    try {
+      await persistRow(SPECIAL_KEYS.SHIPMENTS, nextData);
+      setShipmentData(nextData);
+      setShipItems([]);
+      setGoldbarQty({});
+      setGoldbeanQty({});
+      setShipDate(todayStr());
+      setShipMsg("已保存这次出货记录");
+    } catch {
+      setShipMsg("保存失败，检查网络后重试");
+    } finally {
+      setShipSaving(false);
+    }
+  }
+
+  async function deleteShipmentRecord(id) {
+    if (!window.confirm("确定删除这条出货记录？")) return;
+    const nextData = { history: shipmentData.history.filter((r) => r.id !== id) };
+    try {
+      await persistRow(SPECIAL_KEYS.SHIPMENTS, nextData);
+      setShipmentData(nextData);
+    } catch {
+      setShipMsg("删除失败，检查网络后重试");
+    }
+  }
+
+  const shipCategories = useMemo(() => {
+    const set = new Set(["戒指", "链", "牌", "GOLDBAR", "GOLDBEAN"]);
+    shipmentData.history.forEach((r) => r.items.forEach((i) => set.add(i.category)));
+    return Array.from(set);
+  }, [shipmentData.history]);
+
+  const shipRowsSorted = useMemo(
+    () => [...shipmentData.history].sort((a, b) => b.date.localeCompare(a.date)),
+    [shipmentData.history]
+  );
+
+  // ---- 转手核对 ----
+  async function saveThreshold() {
+    const t = parseFloat(thresholdDraft);
+    if (Number.isNaN(t) || t < 0) return;
+    const nextData = { ...transferData, threshold: t };
+    try {
+      await persistRow(SPECIAL_KEYS.TRANSFERS, nextData);
+      setTransferData(nextData);
+    } catch {
+      setTransMsg("阈值更新失败，检查网络后重试");
+    }
+  }
+
+  async function saveTransfer() {
+    setTransError("");
+    setTransMsg("");
+    const type = transType === "OTHER" ? transTypeCustom.trim() : transType;
+    const sent = parseFloat(transSent);
+    const received = parseFloat(transReceived);
+    if (!type) {
+      setTransError("请填写类型");
+      return;
+    }
+    if (transSent === "" || Number.isNaN(sent)) {
+      setTransError("请填写送出方重量");
+      return;
+    }
+    if (transReceived === "" || Number.isNaN(received)) {
+      setTransError("请填写接收方重量");
+      return;
+    }
+    setTransSaving(true);
+    const record = {
+      id: Date.now() + Math.random(),
+      date: transDate,
+      type,
+      desc: transDesc.trim(),
+      sent,
+      received,
+      diff: received - sent,
+    };
+    const nextData = { ...transferData, history: [...transferData.history, record] };
+    try {
+      await persistRow(SPECIAL_KEYS.TRANSFERS, nextData);
+      setTransferData(nextData);
+      setTransDesc("");
+      setTransSent("");
+      setTransReceived("");
+      setTransTypeCustom("");
+      setTransDate(todayStr());
+      setTransMsg("已保存");
+    } catch {
+      setTransMsg("保存失败，检查网络后重试");
+    } finally {
+      setTransSaving(false);
+    }
+  }
+
+  async function deleteTransferRecord(id) {
+    if (!window.confirm("确定删除这条记录？")) return;
+    const nextData = {
+      ...transferData,
+      history: transferData.history.filter((r) => r.id !== id),
+    };
+    try {
+      await persistRow(SPECIAL_KEYS.TRANSFERS, nextData);
+      setTransferData(nextData);
+    } catch {
+      setTransMsg("删除失败，检查网络后重试");
+    }
+  }
+
+  const transRowsSorted = useMemo(
+    () => [...transferData.history].sort((a, b) => b.date.localeCompare(a.date)),
+    [transferData.history]
+  );
 
   async function saveDay() {
     setActualError("");
@@ -479,6 +721,30 @@ export default function GoldLedger() {
         )}
       </div>
 
+      <div className="flex gap-2 mb-6">
+        {[
+          { key: "workers", label: "对账", icon: Scale },
+          { key: "shipments", label: "出货记录", icon: Truck },
+          { key: "transfers", label: "转手核对", icon: ArrowLeftRight },
+        ].map((v) => (
+          <button
+            key={v.key}
+            onClick={() => setView(v.key)}
+            className={
+              "flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-colors " +
+              (view === v.key
+                ? "bg-amber-500 text-stone-950"
+                : "bg-stone-900 text-stone-300 hover:bg-stone-800 border border-stone-800")
+            }
+          >
+            <v.icon className="w-4 h-4" />
+            {v.label}
+          </button>
+        ))}
+      </div>
+
+      {view === "workers" && (
+        <>
       <p className="text-xs text-stone-500 mb-4">
         数据存在Supabase数据库里，团队里打开这个网址的人看到的是同一份记录。
       </p>
@@ -1066,6 +1332,409 @@ export default function GoldLedger() {
             )}
           </div>
         </div>
+      )}
+      </>
+      )}
+
+      {view === "shipments" && (
+        <>
+          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
+            <label className="block text-xs text-amber-400/80 mb-1 font-medium">
+              出货日期
+            </label>
+            <input
+              type="date"
+              value={shipDate}
+              onChange={(e) => setShipDate(e.target.value)}
+              className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+            />
+          </div>
+
+          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
+            <h2 className="text-sm font-medium text-stone-300 mb-3">
+              其他类别出货（戒指 / 链 / 牌 / 自定义）
+            </h2>
+            <div className="grid grid-cols-1 md:grid-cols-[130px_1fr_120px_auto] gap-2 mb-2">
+              <select
+                value={shipCategory}
+                onChange={(e) => setShipCategory(e.target.value)}
+                className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+              >
+                {SHIP_CATEGORIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c === "OTHER" ? "自定义…" : c}
+                  </option>
+                ))}
+              </select>
+              {shipCategory === "OTHER" && (
+                <input
+                  type="text"
+                  placeholder="类别名称"
+                  value={shipCategoryCustom}
+                  onChange={(e) => setShipCategoryCustom(e.target.value)}
+                  className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500"
+                />
+              )}
+              <input
+                type="number"
+                step="0.01"
+                placeholder="重量(g)"
+                value={shipWeight}
+                onChange={(e) => setShipWeight(e.target.value)}
+                className={
+                  "bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500 font-mono " +
+                  (shipCategory === "OTHER" ? "" : "md:col-start-2")
+                }
+              />
+              <button
+                onClick={addShipItem}
+                className="flex items-center justify-center gap-1 bg-stone-800 hover:bg-stone-700 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100"
+              >
+                <Plus className="w-4 h-4" />
+                添加
+              </button>
+            </div>
+            {shipRowError && (
+              <p className="text-xs text-rose-400 mb-2">{shipRowError}</p>
+            )}
+            {shipItems.length > 0 && (
+              <div className="divide-y divide-stone-800 border-t border-stone-800 mt-2">
+                {shipItems.map((it) => (
+                  <div
+                    key={it.id}
+                    className="flex items-center justify-between py-2 text-sm"
+                  >
+                    <span className="text-stone-300">{it.category}</span>
+                    <div className="flex items-center gap-3">
+                      <span className="font-mono tabular-nums text-stone-100">
+                        {fmtPlain(it.weight)} g
+                      </span>
+                      <button
+                        onClick={() => removeShipItem(it.id)}
+                        className="text-stone-600 hover:text-rose-400"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
+            <h2 className="text-sm font-medium text-stone-300 mb-3">
+              GOLDBAR / GOLDBEAN 出货数量
+            </h2>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs text-stone-500 border-b border-stone-800">
+                    <th className="text-left py-2 font-normal">面额</th>
+                    <th className="text-right py-2 font-normal w-28">GOLDBAR</th>
+                    <th className="text-right py-2 font-normal w-28">GOLDBEAN</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-stone-800">
+                  {DENOMINATIONS.map((d) => (
+                    <tr key={d.key}>
+                      <td className="py-1.5 text-stone-400">{d.label}</td>
+                      <td className="py-1.5">
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={goldbarQty[d.key] || ""}
+                          onChange={(e) =>
+                            setGoldbarQty((q) => ({ ...q, [d.key]: e.target.value }))
+                          }
+                          className="w-full bg-stone-950 border border-stone-700 rounded-lg px-2 py-1 text-sm text-right text-stone-100 font-mono focus:outline-none focus:border-amber-500"
+                        />
+                      </td>
+                      <td className="py-1.5">
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={goldbeanQty[d.key] || ""}
+                          onChange={(e) =>
+                            setGoldbeanQty((q) => ({ ...q, [d.key]: e.target.value }))
+                          }
+                          className="w-full bg-stone-950 border border-stone-700 rounded-lg px-2 py-1 text-sm text-right text-stone-100 font-mono focus:outline-none focus:border-amber-500"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="grid grid-cols-2 gap-3 mt-3">
+              <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
+                <p className="text-xs text-stone-500 mb-1">GOLDBAR 小计</p>
+                <p className="font-mono tabular-nums text-stone-200">
+                  {fmtPlain(denomTotal(goldbarQty))} g
+                </p>
+              </div>
+              <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
+                <p className="text-xs text-stone-500 mb-1">GOLDBEAN 小计</p>
+                <p className="font-mono tabular-nums text-stone-200">
+                  {fmtPlain(denomTotal(goldbeanQty))} g
+                </p>
+              </div>
+            </div>
+            <p className="text-xs text-stone-600 mt-2">
+              1 DINAR 按 4.25g、1/2 DINAR 按 2.125g 计算，如果你们用的金币重量不一样，告诉我调整。
+            </p>
+          </div>
+
+          <button
+            onClick={saveShipment}
+            disabled={shipSaving}
+            className="mb-6 w-full md:w-auto flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-stone-950 font-medium rounded-lg px-5 py-2.5 text-sm"
+          >
+            {shipSaving ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Save className="w-4 h-4" />
+            )}
+            保存这次出货
+          </button>
+          {shipMsg && <p className="text-xs text-stone-400 -mt-4 mb-6">{shipMsg}</p>}
+
+          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5">
+            <h2 className="text-sm font-medium text-stone-300 mb-3 flex items-center gap-2">
+              <Truck className="w-4 h-4" />
+              出货记录（按日期，每行一次出货）
+            </h2>
+            {shipRowsSorted.length === 0 ? (
+              <p className="text-sm text-stone-600 py-4 text-center">
+                还没有出货记录
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-xs text-stone-500 border-b border-stone-800">
+                      <th className="text-left py-2 font-normal">日期</th>
+                      {shipCategories.map((c) => (
+                        <th key={c} className="text-right py-2 font-normal">
+                          {c}
+                        </th>
+                      ))}
+                      <th className="text-right py-2 font-normal"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-800">
+                    {shipRowsSorted.map((r) => (
+                      <tr key={r.id}>
+                        <td className="py-2 text-stone-400">{r.date}</td>
+                        {shipCategories.map((c) => {
+                          const w = r.items
+                            .filter((i) => i.category === c)
+                            .reduce((s, i) => s + i.weight, 0);
+                          return (
+                            <td
+                              key={c}
+                              className="py-2 text-right font-mono tabular-nums text-stone-100"
+                            >
+                              {w > 0 ? fmtPlain(w) : "-"}
+                            </td>
+                          );
+                        })}
+                        <td className="py-2 text-right">
+                          <button
+                            onClick={() => deleteShipmentRecord(r.id)}
+                            className="text-stone-600 hover:text-rose-400"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {view === "transfers" && (
+        <>
+          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
+            <h2 className="text-sm font-medium text-stone-300 mb-3">
+              新增一笔核对（送出方 vs 接收方）
+            </h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+              <div>
+                <label className="block text-xs text-stone-500 mb-1">日期</label>
+                <input
+                  type="date"
+                  value={transDate}
+                  onChange={(e) => setTransDate(e.target.value)}
+                  className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-stone-500 mb-1">类型</label>
+                <select
+                  value={transType}
+                  onChange={(e) => setTransType(e.target.value)}
+                  className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                >
+                  {TRANSFER_TYPES.map((t) => (
+                    <option key={t} value={t}>
+                      {t === "OTHER" ? "自定义…" : t}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {transType === "OTHER" && (
+              <input
+                type="text"
+                placeholder="自定义类型名称"
+                value={transTypeCustom}
+                onChange={(e) => setTransTypeCustom(e.target.value)}
+                className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500 mb-3"
+              />
+            )}
+            <input
+              type="text"
+              placeholder="备注（可选，例如：戒指一批）"
+              value={transDesc}
+              onChange={(e) => setTransDesc(e.target.value)}
+              className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500 mb-3"
+            />
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label className="block text-xs text-stone-500 mb-1">送出方重量(g)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={transSent}
+                  onChange={(e) => setTransSent(e.target.value)}
+                  className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm font-mono text-stone-100 focus:outline-none focus:border-amber-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-stone-500 mb-1">接收方重量(g)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={transReceived}
+                  onChange={(e) => setTransReceived(e.target.value)}
+                  className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm font-mono text-stone-100 focus:outline-none focus:border-amber-500"
+                />
+              </div>
+            </div>
+            {transError && (
+              <p className="text-xs text-rose-400 mb-2">{transError}</p>
+            )}
+            <button
+              onClick={saveTransfer}
+              disabled={transSaving}
+              className="flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-stone-950 font-medium rounded-lg px-5 py-2.5 text-sm"
+            >
+              {transSaving ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Save className="w-4 h-4" />
+              )}
+              保存这笔核对
+            </button>
+            {transMsg && <p className="text-xs text-stone-400 mt-2">{transMsg}</p>}
+          </div>
+
+          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
+            <label className="block text-xs text-stone-500 mb-1">
+              误差标红阈值（超过这个数就标红，克）
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={thresholdDraft}
+                onChange={(e) => setThresholdDraft(e.target.value)}
+                className="w-32 bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm font-mono text-stone-100 focus:outline-none focus:border-amber-500"
+              />
+              <button
+                onClick={saveThreshold}
+                className="text-xs px-3 py-2 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
+              >
+                更新阈值
+              </button>
+              <span className="text-xs text-stone-600">
+                当前生效：{fmtPlain(transferData.threshold ?? 0.05)} g
+              </span>
+            </div>
+          </div>
+
+          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5">
+            <h2 className="text-sm font-medium text-stone-300 mb-3 flex items-center gap-2">
+              <ArrowLeftRight className="w-4 h-4" />
+              核对记录
+            </h2>
+            {transRowsSorted.length === 0 ? (
+              <p className="text-sm text-stone-600 py-4 text-center">
+                还没有核对记录
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-xs text-stone-500 border-b border-stone-800">
+                      <th className="text-left py-2 font-normal">日期</th>
+                      <th className="text-left py-2 font-normal">类型</th>
+                      <th className="text-left py-2 font-normal">备注</th>
+                      <th className="text-right py-2 font-normal">送出</th>
+                      <th className="text-right py-2 font-normal">接收</th>
+                      <th className="text-right py-2 font-normal">差异</th>
+                      <th className="text-right py-2 font-normal"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-800">
+                    {transRowsSorted.map((r) => {
+                      const over =
+                        Math.abs(r.diff) > (transferData.threshold ?? 0.05);
+                      return (
+                        <tr key={r.id}>
+                          <td className="py-2 text-stone-400">{r.date}</td>
+                          <td className="py-2 text-stone-300">{r.type}</td>
+                          <td className="py-2 text-stone-500">{r.desc || "-"}</td>
+                          <td className="py-2 text-right font-mono tabular-nums text-stone-300">
+                            {fmtPlain(r.sent)}
+                          </td>
+                          <td className="py-2 text-right font-mono tabular-nums text-stone-300">
+                            {fmtPlain(r.received)}
+                          </td>
+                          <td
+                            className={
+                              "py-2 text-right font-mono tabular-nums flex items-center justify-end gap-1 " +
+                              (over ? "text-rose-400" : "text-emerald-400")
+                            }
+                          >
+                            {over && <AlertTriangle className="w-3 h-3" />}
+                            {fmt(r.diff)}
+                          </td>
+                          <td className="py-2 text-right">
+                            <button
+                              onClick={() => deleteTransferRecord(r.id)}
+                              className="text-stone-600 hover:text-rose-400"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
       )}
     </div>
   );
