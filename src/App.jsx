@@ -47,7 +47,23 @@ const DENOMINATIONS = [
   { key: "50.00", label: "50.00", grams: 50.0 },
   { key: "100.00", label: "100.00", grams: 100.0 },
 ];
-const TRANSFER_TYPES = ["掉色来回", "Lv1↔Lv2上下楼", "OTHER"];
+const TRANSFER_TYPE_PRESETS = ["掉色来回", "Lv1↔Lv2上下楼"];
+// 送出/接收时流水描述的默认建议，都可以在填的时候自己改
+const LABEL_HINTS = {
+  "掉色来回": {
+    JJ: { send: "出 掉色", receive: "加 掉色" },
+    "PD Lv2": { send: "出 掉色", receive: "回 掉色" },
+  },
+  "Lv1↔Lv2上下楼": {
+    "PD Lv1": { send: "上楼", receive: "做工" },
+    "PD Lv2": { send: "下楼", receive: "上楼" },
+  },
+};
+function suggestLabel(type, worker, direction) {
+  const hint = LABEL_HINTS[type] && LABEL_HINTS[type][worker];
+  if (hint && hint[direction]) return hint[direction];
+  return direction === "send" ? `出 ${type}` : `加 ${type}`;
+}
 
 const emptyShipmentData = () => ({ history: [] });
 const emptyTransferData = () => ({ threshold: 0.05, history: [] });
@@ -78,7 +94,7 @@ function destinationsFor(worker) {
   return ["", ...WORKERS.filter((w) => w !== worker), ...OTHER_DESTINATIONS];
 }
 
-const emptyWorkerData = () => ({ lastWeight: null, history: [] });
+const emptyWorkerData = () => ({ lastWeight: null, history: [], drafts: {} });
 
 // 按顺序重新计算整条历史链：非归档记录用流水重新算 total/要有/损耗，
 // 归档记录（exported）明细已清空，冻结原本算好的数字不动，只跟着更新 prevWeight。
@@ -107,9 +123,6 @@ export default function GoldLedger() {
     Object.fromEntries(WORKERS.map((w) => [w, emptyWorkerData()]))
   );
   const [activeWorker, setActiveWorker] = useState(WORKERS[0]);
-  const [drafts, setDrafts] = useState(() =>
-    Object.fromEntries(WORKERS.map((w) => [w, []]))
-  );
   const [descInput, setDescInput] = useState("");
   const [amountInput, setAmountInput] = useState("");
   const [destInput, setDestInput] = useState("");
@@ -159,15 +172,22 @@ export default function GoldLedger() {
   // 转手核对
   const [transferData, setTransferData] = useState(emptyTransferData());
   const [thresholdDraft, setThresholdDraft] = useState("0.05");
-  const [transDate, setTransDate] = useState(todayStr());
-  const [transType, setTransType] = useState(TRANSFER_TYPES[0]);
+  const [transType, setTransType] = useState(TRANSFER_TYPE_PRESETS[0]);
   const [transTypeCustom, setTransTypeCustom] = useState("");
-  const [transDesc, setTransDesc] = useState("");
-  const [transSent, setTransSent] = useState("");
-  const [transReceived, setTransReceived] = useState("");
+  const [transFrom, setTransFrom] = useState(WORKERS[0]);
+  const [transTo, setTransTo] = useState(WORKERS[1]);
+  const [transSentDate, setTransSentDate] = useState(todayStr());
+  const [transSentWeight, setTransSentWeight] = useState("");
+  const [transSentDesc, setTransSentDesc] = useState("");
   const [transError, setTransError] = useState("");
   const [transSaving, setTransSaving] = useState(false);
   const [transMsg, setTransMsg] = useState("");
+  const [confirmingId, setConfirmingId] = useState(null);
+  const [confirmDate, setConfirmDate] = useState(todayStr());
+  const [confirmWeight, setConfirmWeight] = useState("");
+  const [confirmDesc, setConfirmDesc] = useState("");
+  const [confirmError, setConfirmError] = useState("");
+  const [confirmSaving, setConfirmSaving] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -183,11 +203,11 @@ export default function GoldLedger() {
       let nextTransfers = emptyTransferData();
       for (const row of rows || []) {
         if (row.worker === SPECIAL_KEYS.SHIPMENTS) {
-          nextShipments = row.data || emptyShipmentData();
+          nextShipments = { ...emptyShipmentData(), ...(row.data || {}) };
         } else if (row.worker === SPECIAL_KEYS.TRANSFERS) {
-          nextTransfers = row.data || emptyTransferData();
+          nextTransfers = { ...emptyTransferData(), ...(row.data || {}) };
         } else {
-          next[row.worker] = row.data || emptyWorkerData();
+          next[row.worker] = { ...emptyWorkerData(), ...(row.data || {}) };
         }
       }
       if (!cancelled) {
@@ -209,8 +229,13 @@ export default function GoldLedger() {
     };
   }, []);
 
+  useEffect(() => {
+    const type = transType === "OTHER" ? transTypeCustom.trim() || "转手" : transType;
+    setTransSentDesc(suggestLabel(type, transFrom, "send"));
+  }, [transType, transTypeCustom, transFrom]);
+
   const cur = data[activeWorker] || emptyWorkerData();
-  const curDraft = drafts[activeWorker] || [];
+  const curDraft = (cur.drafts && cur.drafts[dateInput]) || [];
   const totalChange = useMemo(
     () => curDraft.reduce((s, t) => s + t.amount, 0),
     [curDraft]
@@ -236,13 +261,8 @@ export default function GoldLedger() {
       setRowError("请填写有效的加减数量（不能为0）");
       return;
     }
-    setDrafts((d) => ({
-      ...d,
-      [activeWorker]: [
-        ...(d[activeWorker] || []),
-        { id: Date.now() + Math.random(), desc: descInput.trim(), amount: amt, dest: destInput },
-      ],
-    }));
+    const item = { id: Date.now() + Math.random(), desc: descInput.trim(), amount: amt, dest: destInput };
+    updateWorkerDrafts(activeWorker, dateInput, (list) => [...list, item]);
     setDescInput("");
     setAmountInput("");
     setDestInput("");
@@ -250,10 +270,27 @@ export default function GoldLedger() {
   }
 
   function removeRow(id) {
-    setDrafts((d) => ({
-      ...d,
-      [activeWorker]: (d[activeWorker] || []).filter((t) => t.id !== id),
-    }));
+    updateWorkerDrafts(activeWorker, dateInput, (list) => list.filter((t) => t.id !== id));
+  }
+
+  // 更新某个worker在某天的暂存流水，并存进数据库（跨设备同步用）
+  function updateWorkerDrafts(worker, date, updaterFn) {
+    setData((d) => {
+      const workerData = d[worker] || emptyWorkerData();
+      const currentList = (workerData.drafts && workerData.drafts[date]) || [];
+      const newList = updaterFn(currentList);
+      const nextDrafts = { ...(workerData.drafts || {}) };
+      if (newList.length === 0) {
+        delete nextDrafts[date];
+      } else {
+        nextDrafts[date] = newList;
+      }
+      const nextWorkerData = { ...workerData, drafts: nextDrafts };
+      persistRow(worker, nextWorkerData).catch(() => {
+        setSaveMsg("同步失败，检查网络（这条记录可能还没同步到其他设备）");
+      });
+      return { ...d, [worker]: nextWorkerData };
+    });
   }
 
   async function persistRow(key, nextData) {
@@ -378,44 +415,56 @@ export default function GoldLedger() {
     }
   }
 
-  async function saveTransfer() {
+  // 送出方先保存（半保存），自动写入送出方当天流水（减）
+  async function saveSentHalf() {
     setTransError("");
     setTransMsg("");
     const type = transType === "OTHER" ? transTypeCustom.trim() : transType;
-    const sent = parseFloat(transSent);
-    const received = parseFloat(transReceived);
+    const weight = parseFloat(transSentWeight);
     if (!type) {
       setTransError("请填写类型");
       return;
     }
-    if (transSent === "" || Number.isNaN(sent)) {
-      setTransError("请填写送出方重量");
+    if (transFrom === transTo) {
+      setTransError("送出方和接收方不能是同一个");
       return;
     }
-    if (transReceived === "" || Number.isNaN(received)) {
-      setTransError("请填写接收方重量");
+    if (transSentWeight === "" || Number.isNaN(weight) || weight <= 0) {
+      setTransError("请填写有效的送出方重量");
+      return;
+    }
+    if (!transSentDesc.trim()) {
+      setTransError("请填写送出方的流水描述");
       return;
     }
     setTransSaving(true);
+    const sentItemId = Date.now() + Math.random();
     const record = {
       id: Date.now() + Math.random(),
-      date: transDate,
       type,
-      desc: transDesc.trim(),
-      sent,
-      received,
-      diff: received - sent,
+      fromWorker: transFrom,
+      toWorker: transTo,
+      sentDate: transSentDate,
+      sentWeight: weight,
+      sentDesc: transSentDesc.trim(),
+      sentItemId,
+      receivedDate: null,
+      receivedWeight: null,
+      receivedDesc: null,
+      receivedItemId: null,
+      status: "pending",
+      diff: null,
     };
     const nextData = { ...transferData, history: [...transferData.history, record] };
+    updateWorkerDrafts(transFrom, transSentDate, (list) => [
+      ...list,
+      { id: sentItemId, desc: transSentDesc.trim(), amount: -weight, dest: transTo },
+    ]);
     try {
       await persistRow(SPECIAL_KEYS.TRANSFERS, nextData);
       setTransferData(nextData);
-      setTransDesc("");
-      setTransSent("");
-      setTransReceived("");
-      setTransTypeCustom("");
-      setTransDate(todayStr());
-      setTransMsg("已保存");
+      setTransSentWeight("");
+      setTransMsg(`已保存送出方重量，已经写进 ${transFrom} 当天流水，等 ${transTo} 收到后来确认。`);
     } catch {
       setTransMsg("保存失败，检查网络后重试");
     } finally {
@@ -423,22 +472,95 @@ export default function GoldLedger() {
     }
   }
 
-  async function deleteTransferRecord(id) {
-    if (!window.confirm("确定删除这条记录？")) return;
-    const nextData = {
-      ...transferData,
-      history: transferData.history.filter((r) => r.id !== id),
+  function openConfirm(record) {
+    setConfirmingId(record.id);
+    setConfirmDate(todayStr());
+    setConfirmWeight("");
+    setConfirmDesc(suggestLabel(record.type, record.toWorker, "receive"));
+    setConfirmError("");
+  }
+
+  // 接收方确认收到，自动写入接收方当天流水（加），并算差异
+  async function confirmReceived() {
+    setConfirmError("");
+    const record = transferData.history.find((r) => r.id === confirmingId);
+    if (!record) return;
+    const weight = parseFloat(confirmWeight);
+    if (confirmWeight === "" || Number.isNaN(weight) || weight <= 0) {
+      setConfirmError("请填写有效的接收方重量");
+      return;
+    }
+    if (!confirmDesc.trim()) {
+      setConfirmError("请填写接收方的流水描述");
+      return;
+    }
+    setConfirmSaving(true);
+    const receivedItemId = Date.now() + Math.random();
+    const updatedRecord = {
+      ...record,
+      receivedDate: confirmDate,
+      receivedWeight: weight,
+      receivedDesc: confirmDesc.trim(),
+      receivedItemId,
+      status: "confirmed",
+      diff: weight - record.sentWeight,
     };
+    const nextHistory = transferData.history.map((r) =>
+      r.id === confirmingId ? updatedRecord : r
+    );
+    const nextData = { ...transferData, history: nextHistory };
+    updateWorkerDrafts(record.toWorker, confirmDate, (list) => [
+      ...list,
+      { id: receivedItemId, desc: confirmDesc.trim(), amount: weight, dest: record.fromWorker },
+    ]);
     try {
       await persistRow(SPECIAL_KEYS.TRANSFERS, nextData);
       setTransferData(nextData);
+      setConfirmingId(null);
     } catch {
-      setTransMsg("删除失败，检查网络后重试");
+      setConfirmError("保存失败，检查网络后重试");
+    } finally {
+      setConfirmSaving(false);
     }
   }
 
-  const transRowsSorted = useMemo(
-    () => [...transferData.history].sort((a, b) => b.date.localeCompare(a.date)),
+  function deleteTransferRecord(record) {
+    const msg =
+      record.status === "pending"
+        ? "确定取消这笔待确认的核对？（已经写进送出方流水的那条也会一起撤销）"
+        : "确定删除这条已确认的核对记录？（如果对应流水已经存档保存过，需要去对账页面手动调整）";
+    if (!window.confirm(msg)) return;
+    if (record.sentItemId) {
+      updateWorkerDrafts(record.fromWorker, record.sentDate, (list) =>
+        list.filter((t) => t.id !== record.sentItemId)
+      );
+    }
+    if (record.receivedItemId) {
+      updateWorkerDrafts(record.toWorker, record.receivedDate, (list) =>
+        list.filter((t) => t.id !== record.receivedItemId)
+      );
+    }
+    const nextData = {
+      ...transferData,
+      history: transferData.history.filter((r) => r.id !== record.id),
+    };
+    persistRow(SPECIAL_KEYS.TRANSFERS, nextData)
+      .then(() => setTransferData(nextData))
+      .catch(() => setTransMsg("删除失败，检查网络后重试"));
+  }
+
+  const pendingTransfers = useMemo(
+    () =>
+      transferData.history
+        .filter((r) => r.status === "pending")
+        .sort((a, b) => b.sentDate.localeCompare(a.sentDate)),
+    [transferData.history]
+  );
+  const confirmedTransfers = useMemo(
+    () =>
+      transferData.history
+        .filter((r) => r.status === "confirmed")
+        .sort((a, b) => b.receivedDate.localeCompare(a.receivedDate)),
     [transferData.history]
   );
 
@@ -457,11 +579,12 @@ export default function GoldLedger() {
       exported: false,
     };
     const newHistory = recomputeChain([...cur.history, rawRecord]);
-    const nextWorkerData = { lastWeight: actualNum, history: newHistory };
+    const nextDrafts = { ...(cur.drafts || {}) };
+    delete nextDrafts[dateInput];
+    const nextWorkerData = { lastWeight: actualNum, history: newHistory, drafts: nextDrafts };
     try {
       await persistWorker(activeWorker, nextWorkerData);
       setData((d) => ({ ...d, [activeWorker]: nextWorkerData }));
-      setDrafts((d) => ({ ...d, [activeWorker]: [] }));
       setActualInput("");
       setDateInput(todayStr());
       setSaveMsg("已保存这一天的记录");
@@ -1563,18 +1686,9 @@ export default function GoldLedger() {
         <>
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
             <h2 className="text-sm font-medium text-stone-300 mb-3">
-              新增一笔核对（送出方 vs 接收方）
+              第一步：送出方先保存重量
             </h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
-              <div>
-                <label className="block text-xs text-stone-500 mb-1">日期</label>
-                <input
-                  type="date"
-                  value={transDate}
-                  onChange={(e) => setTransDate(e.target.value)}
-                  className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
-                />
-              </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
               <div>
                 <label className="block text-xs text-stone-500 mb-1">类型</label>
                 <select
@@ -1582,9 +1696,38 @@ export default function GoldLedger() {
                   onChange={(e) => setTransType(e.target.value)}
                   className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
                 >
-                  {TRANSFER_TYPES.map((t) => (
+                  {TRANSFER_TYPE_PRESETS.map((t) => (
                     <option key={t} value={t}>
-                      {t === "OTHER" ? "自定义…" : t}
+                      {t}
+                    </option>
+                  ))}
+                  <option value="OTHER">自定义…</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-stone-500 mb-1">送出方</label>
+                <select
+                  value={transFrom}
+                  onChange={(e) => setTransFrom(e.target.value)}
+                  className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                >
+                  {WORKERS.map((w) => (
+                    <option key={w} value={w}>
+                      {w}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-stone-500 mb-1">接收方</label>
+                <select
+                  value={transTo}
+                  onChange={(e) => setTransTo(e.target.value)}
+                  className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                >
+                  {WORKERS.map((w) => (
+                    <option key={w} value={w}>
+                      {w}
                     </option>
                   ))}
                 </select>
@@ -1599,40 +1742,41 @@ export default function GoldLedger() {
                 className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500 mb-3"
               />
             )}
-            <input
-              type="text"
-              placeholder="备注（可选，例如：戒指一批）"
-              value={transDesc}
-              onChange={(e) => setTransDesc(e.target.value)}
-              className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500 mb-3"
-            />
-            <div className="grid grid-cols-2 gap-3 mb-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+              <div>
+                <label className="block text-xs text-stone-500 mb-1">送出日期</label>
+                <input
+                  type="date"
+                  value={transSentDate}
+                  onChange={(e) => setTransSentDate(e.target.value)}
+                  className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                />
+              </div>
               <div>
                 <label className="block text-xs text-stone-500 mb-1">送出方重量(g)</label>
                 <input
                   type="number"
                   step="0.01"
-                  value={transSent}
-                  onChange={(e) => setTransSent(e.target.value)}
+                  value={transSentWeight}
+                  onChange={(e) => setTransSentWeight(e.target.value)}
                   className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm font-mono text-stone-100 focus:outline-none focus:border-amber-500"
                 />
               </div>
               <div>
-                <label className="block text-xs text-stone-500 mb-1">接收方重量(g)</label>
+                <label className="block text-xs text-stone-500 mb-1">
+                  {transFrom} 流水描述（会自动写进当天流水，可以改）
+                </label>
                 <input
-                  type="number"
-                  step="0.01"
-                  value={transReceived}
-                  onChange={(e) => setTransReceived(e.target.value)}
-                  className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm font-mono text-stone-100 focus:outline-none focus:border-amber-500"
+                  type="text"
+                  value={transSentDesc}
+                  onChange={(e) => setTransSentDesc(e.target.value)}
+                  className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
                 />
               </div>
             </div>
-            {transError && (
-              <p className="text-xs text-rose-400 mb-2">{transError}</p>
-            )}
+            {transError && <p className="text-xs text-rose-400 mb-2">{transError}</p>}
             <button
-              onClick={saveTransfer}
+              onClick={saveSentHalf}
               disabled={transSaving}
               className="flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-stone-950 font-medium rounded-lg px-5 py-2.5 text-sm"
             >
@@ -1641,9 +1785,139 @@ export default function GoldLedger() {
               ) : (
                 <Save className="w-4 h-4" />
               )}
-              保存这笔核对
+              保存送出方重量（半保存）
             </button>
             {transMsg && <p className="text-xs text-stone-400 mt-2">{transMsg}</p>}
+          </div>
+
+          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
+            <h2 className="text-sm font-medium text-stone-300 mb-3">
+              待确认（{pendingTransfers.length}）
+            </h2>
+            {pendingTransfers.length === 0 ? (
+              <p className="text-sm text-stone-600 py-4 text-center">
+                没有等待确认的记录
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {pendingTransfers.map((r) => (
+                  <div
+                    key={r.id}
+                    className="bg-stone-950 border border-stone-800 rounded-lg p-3"
+                  >
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div className="text-sm text-stone-300">
+                        <span className="text-amber-400">{r.type}</span>
+                        {"  "}
+                        {r.fromWorker} → {r.toWorker}
+                        <span className="text-stone-500 ml-2">{r.sentDate}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono tabular-nums text-stone-100 text-sm">
+                          {fmtPlain(r.sentWeight)} g
+                        </span>
+                        <button
+                          onClick={() => deleteTransferRecord(r)}
+                          className="text-stone-600 hover:text-rose-400"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                    <p className="text-xs text-stone-600 mt-1">
+                      送出方流水：{r.sentDesc}
+                    </p>
+
+                    {confirmingId === r.id ? (
+                      <div className="mt-3 pt-3 border-t border-stone-800">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
+                          <div>
+                            <label className="block text-xs text-stone-500 mb-1">
+                              接收日期
+                            </label>
+                            <input
+                              type="date"
+                              value={confirmDate}
+                              onChange={(e) => setConfirmDate(e.target.value)}
+                              className="w-full bg-stone-900 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs text-stone-500 mb-1">
+                              接收方重量(g)
+                            </label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={confirmWeight}
+                              onChange={(e) => setConfirmWeight(e.target.value)}
+                              className="w-full bg-stone-900 border border-stone-700 rounded-lg px-3 py-2 text-sm font-mono text-stone-100 focus:outline-none focus:border-amber-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs text-stone-500 mb-1">
+                              {r.toWorker} 流水描述
+                            </label>
+                            <input
+                              type="text"
+                              value={confirmDesc}
+                              onChange={(e) => setConfirmDesc(e.target.value)}
+                              className="w-full bg-stone-900 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                            />
+                          </div>
+                        </div>
+                        {confirmWeight !== "" && !Number.isNaN(parseFloat(confirmWeight)) && (
+                          <p className="text-xs text-stone-500 mb-2">
+                            差异预览：
+                            <span
+                              className={
+                                Math.abs(parseFloat(confirmWeight) - r.sentWeight) >
+                                (transferData.threshold ?? 0.05)
+                                  ? "text-rose-400"
+                                  : "text-emerald-400"
+                              }
+                            >
+                              {" "}
+                              {fmt(parseFloat(confirmWeight) - r.sentWeight)} g
+                            </span>
+                          </p>
+                        )}
+                        {confirmError && (
+                          <p className="text-xs text-rose-400 mb-2">{confirmError}</p>
+                        )}
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={confirmReceived}
+                            disabled={confirmSaving}
+                            className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-stone-950 font-medium rounded-lg px-4 py-2 text-sm"
+                          >
+                            {confirmSaving ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <CheckCircle2 className="w-4 h-4" />
+                            )}
+                            确认接收
+                          </button>
+                          <button
+                            onClick={() => setConfirmingId(null)}
+                            className="text-xs px-3 py-2 rounded-lg text-stone-500 hover:text-stone-300"
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => openConfirm(r)}
+                        className="mt-2 text-xs px-3 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
+                      >
+                        {r.toWorker} 确认接收
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
@@ -1674,20 +1948,19 @@ export default function GoldLedger() {
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5">
             <h2 className="text-sm font-medium text-stone-300 mb-3 flex items-center gap-2">
               <ArrowLeftRight className="w-4 h-4" />
-              核对记录
+              已确认（{confirmedTransfers.length}）
             </h2>
-            {transRowsSorted.length === 0 ? (
+            {confirmedTransfers.length === 0 ? (
               <p className="text-sm text-stone-600 py-4 text-center">
-                还没有核对记录
+                还没有已确认的记录
               </p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-xs text-stone-500 border-b border-stone-800">
-                      <th className="text-left py-2 font-normal">日期</th>
                       <th className="text-left py-2 font-normal">类型</th>
-                      <th className="text-left py-2 font-normal">备注</th>
+                      <th className="text-left py-2 font-normal">送出→接收</th>
                       <th className="text-right py-2 font-normal">送出</th>
                       <th className="text-right py-2 font-normal">接收</th>
                       <th className="text-right py-2 font-normal">差异</th>
@@ -1695,32 +1968,37 @@ export default function GoldLedger() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-stone-800">
-                    {transRowsSorted.map((r) => {
-                      const over =
-                        Math.abs(r.diff) > (transferData.threshold ?? 0.05);
+                    {confirmedTransfers.map((r) => {
+                      const over = Math.abs(r.diff) > (transferData.threshold ?? 0.05);
                       return (
                         <tr key={r.id}>
-                          <td className="py-2 text-stone-400">{r.date}</td>
                           <td className="py-2 text-stone-300">{r.type}</td>
-                          <td className="py-2 text-stone-500">{r.desc || "-"}</td>
-                          <td className="py-2 text-right font-mono tabular-nums text-stone-300">
-                            {fmtPlain(r.sent)}
+                          <td className="py-2 text-stone-400">
+                            {r.fromWorker} → {r.toWorker}
+                            <div className="text-xs text-stone-600">
+                              {r.sentDate} → {r.receivedDate}
+                            </div>
                           </td>
                           <td className="py-2 text-right font-mono tabular-nums text-stone-300">
-                            {fmtPlain(r.received)}
+                            {fmtPlain(r.sentWeight)}
+                          </td>
+                          <td className="py-2 text-right font-mono tabular-nums text-stone-300">
+                            {fmtPlain(r.receivedWeight)}
                           </td>
                           <td
                             className={
-                              "py-2 text-right font-mono tabular-nums flex items-center justify-end gap-1 " +
+                              "py-2 text-right font-mono tabular-nums " +
                               (over ? "text-rose-400" : "text-emerald-400")
                             }
                           >
-                            {over && <AlertTriangle className="w-3 h-3" />}
-                            {fmt(r.diff)}
+                            <span className="inline-flex items-center gap-1">
+                              {over && <AlertTriangle className="w-3 h-3" />}
+                              {fmt(r.diff)}
+                            </span>
                           </td>
                           <td className="py-2 text-right">
                             <button
-                              onClick={() => deleteTransferRecord(r.id)}
+                              onClick={() => deleteTransferRecord(r)}
                               className="text-stone-600 hover:text-rose-400"
                             >
                               <Trash2 className="w-4 h-4" />
