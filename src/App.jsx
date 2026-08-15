@@ -146,7 +146,7 @@ export default function GoldLedger() {
     setActualError("");
     setSaveMsg("");
     if (actualInput === "" || Number.isNaN(actualNum)) {
-      setActualError("请填写今天过秤读到的实重");
+      setActualError("请填写这一天过秤读到的实重");
       return;
     }
     setSaving(true);
@@ -179,7 +179,7 @@ export default function GoldLedger() {
       setDrafts((d) => ({ ...d, [activeWorker]: [] }));
       setActualInput("");
       setDateInput(todayStr());
-      setSaveMsg("已保存今天的记录");
+      setSaveMsg("已保存这一天的记录");
     } catch {
       setSaveMsg("保存失败，检查网络或Supabase配置，请重试一次");
     } finally {
@@ -273,6 +273,21 @@ export default function GoldLedger() {
         ))}
       </div>
 
+      <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 mb-6">
+        <label className="block text-xs text-amber-400/80 mb-1 font-medium">
+          正在录入哪一天的数据？
+        </label>
+        <input
+          type="date"
+          value={dateInput}
+          onChange={(e) => setDateInput(e.target.value)}
+          className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+        />
+        <p className="text-xs text-stone-500 mt-2">
+          下面的流水和实重都会记在这个日期上。补录以前的数据时，请从最早的一天开始，按顺序一天天存完再存下一天。
+        </p>
+      </div>
+
       <div className="grid md:grid-cols-3 gap-4 mb-6">
         <div className="bg-stone-900 border border-stone-800 rounded-xl p-4">
           <p className="text-xs text-stone-500 mb-1">上次实重</p>
@@ -312,13 +327,13 @@ export default function GoldLedger() {
 
       {!hasBaseline && (
         <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 mb-6 text-sm text-amber-300">
-          还没有 {activeWorker} 的期初实重，先在下面填入今天过秤的重量作为起点，之后就能自动算损耗了。
+          还没有 {activeWorker} 的期初实重，先在下面填入这一天过秤的重量作为起点，之后就能自动算损耗了。
         </div>
       )}
 
       <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
         <h2 className="text-sm font-medium text-stone-300 mb-3">
-          今日流水（{activeWorker}）
+          {dateInput} 流水（{activeWorker}）
         </h2>
 
         <div className="grid grid-cols-1 md:grid-cols-[1fr_120px_130px_auto] gap-2 mb-2">
@@ -360,7 +375,7 @@ export default function GoldLedger() {
 
         {curDraft.length === 0 ? (
           <p className="text-sm text-stone-600 py-4 text-center">
-            今天还没有记录任何加减
+            这一天还没有记录任何加减
           </p>
         ) : (
           <div className="divide-y divide-stone-800 border-t border-stone-800 mt-2">
@@ -403,32 +418,18 @@ export default function GoldLedger() {
       <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
         <h2 className="text-sm font-medium text-stone-300 mb-3">过秤结算</h2>
 
-        <div className="grid md:grid-cols-2 gap-4 items-end">
-          <div>
-            <label className="block text-xs text-stone-500 mb-1">日期</label>
-            <input
-              type="date"
-              value={dateInput}
-              onChange={(e) => setDateInput(e.target.value)}
-              className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
-            />
-            <p className="text-xs text-stone-600 mt-1">
-              可以选任意过去的日期来补录。补录多天时，请从最早的一天开始，按顺序一天天保存。
-            </p>
-          </div>
-          <div>
-            <label className="block text-xs text-stone-500 mb-1">
-              实重（今天过秤读数，克）
-            </label>
-            <input
-              type="number"
-              step="0.01"
-              placeholder="从秤上读到的数字"
-              value={actualInput}
-              onChange={(e) => setActualInput(e.target.value)}
-              className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-lg font-mono tabular-nums text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500"
-            />
-          </div>
+        <div>
+          <label className="block text-xs text-stone-500 mb-1">
+            实重（{dateInput} 过秤读数，克）
+          </label>
+          <input
+            type="number"
+            step="0.01"
+            placeholder="从秤上读到的数字"
+            value={actualInput}
+            onChange={(e) => setActualInput(e.target.value)}
+            className="w-full md:w-72 bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-lg font-mono tabular-nums text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500"
+          />
         </div>
         {actualError && (
           <p className="text-xs text-rose-400 mt-2">{actualError}</p>
@@ -487,7 +488,7 @@ export default function GoldLedger() {
           ) : (
             <Save className="w-4 h-4" />
           )}
-          保存今天
+          保存这一天
         </button>
         {saveMsg && (
           <p className="text-xs text-stone-400 mt-2">{saveMsg}</p>
