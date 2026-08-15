@@ -14,16 +14,13 @@ import {
 } from "lucide-react";
 
 const WORKERS = ["JJ", "PD Lv2", "PD Lv1", "倒模", "Lv1倒模车花"];
-const DESTINATIONS = [
-  "",
+const OTHER_DESTINATIONS = [
   "老板",
   "现货",
   "PD门市",
   "JJ门市",
-  "倒模",
   "TUN/ABAD",
   "REPAIR",
-  "JJ↔PD Lv2",
   "OTHER",
 ];
 const LOSS_THRESHOLD = 1; // 克，超过这个数就标红提醒
@@ -64,6 +61,8 @@ export default function GoldLedger() {
   const [dateInput, setDateInput] = useState(todayStr());
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
+  const [confirmUndo, setConfirmUndo] = useState(false);
+  const [undoing, setUndoing] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -101,6 +100,10 @@ export default function GoldLedger() {
   );
   const hasBaseline = cur.lastWeight !== null;
   const expected = hasBaseline ? cur.lastWeight + totalChange : null;
+  const destinations = useMemo(
+    () => ["", ...WORKERS.filter((w) => w !== activeWorker), ...OTHER_DESTINATIONS],
+    [activeWorker]
+  );
 
   const actualNum = actualInput === "" ? null : parseFloat(actualInput);
   const loss =
@@ -181,6 +184,35 @@ export default function GoldLedger() {
       setSaveMsg("保存失败，检查网络或Supabase配置，请重试一次");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function undoLastDay() {
+    if (cur.history.length === 0) return;
+    setUndoing(true);
+    const newHistory = cur.history.slice(0, -1);
+    const prevWeight =
+      newHistory.length > 0 ? newHistory[newHistory.length - 1].actual : null;
+    const nextWorkerData = { lastWeight: prevWeight, history: newHistory };
+    try {
+      const { error } = await supabase
+        .from("gold_ledger")
+        .upsert(
+          {
+            worker: activeWorker,
+            data: nextWorkerData,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "worker" }
+        );
+      if (error) throw error;
+      setData((d) => ({ ...d, [activeWorker]: nextWorkerData }));
+      setSaveMsg("已撤销最近一天的记录");
+    } catch {
+      setSaveMsg("撤销失败，检查网络后重试");
+    } finally {
+      setUndoing(false);
+      setConfirmUndo(false);
     }
   }
 
@@ -310,7 +342,7 @@ export default function GoldLedger() {
             onChange={(e) => setDestInput(e.target.value)}
             className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
           >
-            {DESTINATIONS.map((d) => (
+            {destinations.map((d) => (
               <option key={d} value={d}>
                 {d === "" ? "去向（可选）" : d}
               </option>
@@ -380,6 +412,9 @@ export default function GoldLedger() {
               onChange={(e) => setDateInput(e.target.value)}
               className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
             />
+            <p className="text-xs text-stone-600 mt-1">
+              可以选任意过去的日期来补录。补录多天时，请从最早的一天开始，按顺序一天天保存。
+            </p>
           </div>
           <div>
             <label className="block text-xs text-stone-500 mb-1">
@@ -460,10 +495,45 @@ export default function GoldLedger() {
       </div>
 
       <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5">
-        <h2 className="text-sm font-medium text-stone-300 mb-3 flex items-center gap-2">
-          <History className="w-4 h-4" />
-          历史记录（最近 {recentHistory.length} 天）
-        </h2>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-medium text-stone-300 flex items-center gap-2">
+            <History className="w-4 h-4" />
+            历史记录（最近 {recentHistory.length} 天）
+          </h2>
+          {cur.history.length > 0 && (
+            <div className="flex items-center gap-2">
+              {confirmUndo && (
+                <span className="text-xs text-rose-400">确定撤销最近一天？</span>
+              )}
+              <button
+                onClick={() =>
+                  confirmUndo ? undoLastDay() : setConfirmUndo(true)
+                }
+                disabled={undoing}
+                className={
+                  "text-xs px-3 py-1.5 rounded-lg border disabled:opacity-60 " +
+                  (confirmUndo
+                    ? "bg-rose-500/10 border-rose-500/40 text-rose-400"
+                    : "bg-stone-800 border-stone-700 text-stone-400 hover:text-stone-200")
+                }
+              >
+                {undoing
+                  ? "撤销中…"
+                  : confirmUndo
+                  ? "确认撤销"
+                  : "撤销最近一天"}
+              </button>
+              {confirmUndo && (
+                <button
+                  onClick={() => setConfirmUndo(false)}
+                  className="text-xs px-3 py-1.5 rounded-lg text-stone-500 hover:text-stone-300"
+                >
+                  取消
+                </button>
+              )}
+            </div>
+          )}
+        </div>
         {recentHistory.length === 0 ? (
           <p className="text-sm text-stone-600 py-4 text-center">
             还没有历史记录
