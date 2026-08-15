@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import * as XLSX from "xlsx";
 import { supabase } from "./supabaseClient.js";
 import {
   Scale,
@@ -11,6 +12,10 @@ import {
   AlertTriangle,
   Loader2,
   History,
+  Download,
+  Archive,
+  X,
+  Lock,
 } from "lucide-react";
 
 const WORKERS = ["JJ", "PD Lv2", "PD Lv1", "倒模", "Lv1倒模车花"];
@@ -40,7 +45,31 @@ function fmtPlain(n) {
   return (Math.round(n * 100) / 100).toFixed(2);
 }
 
+function destinationsFor(worker) {
+  return ["", ...WORKERS.filter((w) => w !== worker), ...OTHER_DESTINATIONS];
+}
+
 const emptyWorkerData = () => ({ lastWeight: null, history: [] });
+
+// 按顺序重新计算整条历史链：非归档记录用流水重新算 total/要有/损耗，
+// 归档记录（exported）明细已清空，冻结原本算好的数字不动，只跟着更新 prevWeight。
+function recomputeChain(history) {
+  let prev = null;
+  const next = history.map((r) => {
+    if (r.exported) {
+      const updated = { ...r, prevWeight: prev };
+      prev = r.actual;
+      return updated;
+    }
+    const total = (r.transactions || []).reduce((s, t) => s + t.amount, 0);
+    const expected = prev !== null ? prev + total : null;
+    const loss = expected !== null ? r.actual - expected : null;
+    const updated = { ...r, prevWeight: prev, total, expected, loss };
+    prev = r.actual;
+    return updated;
+  });
+  return next;
+}
 
 export default function GoldLedger() {
   const [ready, setReady] = useState(false);
@@ -63,6 +92,24 @@ export default function GoldLedger() {
   const [saveMsg, setSaveMsg] = useState("");
   const [confirmUndo, setConfirmUndo] = useState(false);
   const [undoing, setUndoing] = useState(false);
+
+  // 导出 / 归档
+  const [exporting, setExporting] = useState(false);
+  const [exportMsg, setExportMsg] = useState("");
+  const [pendingExportKeys, setPendingExportKeys] = useState(null);
+  const [clearing, setClearing] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  // 详情弹窗
+  const [showDetail, setShowDetail] = useState(null); // { worker, index } | null
+  const [editTransactions, setEditTransactions] = useState([]);
+  const [editActual, setEditActual] = useState("");
+  const [detailDesc, setDetailDesc] = useState("");
+  const [detailAmount, setDetailAmount] = useState("");
+  const [detailDest, setDetailDest] = useState("");
+  const [detailRowError, setDetailRowError] = useState("");
+  const [detailError, setDetailError] = useState("");
+  const [detailSaving, setDetailSaving] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,10 +147,7 @@ export default function GoldLedger() {
   );
   const hasBaseline = cur.lastWeight !== null;
   const expected = hasBaseline ? cur.lastWeight + totalChange : null;
-  const destinations = useMemo(
-    () => ["", ...WORKERS.filter((w) => w !== activeWorker), ...OTHER_DESTINATIONS],
-    [activeWorker]
-  );
+  const destinations = useMemo(() => destinationsFor(activeWorker), [activeWorker]);
 
   const actualNum = actualInput === "" ? null : parseFloat(actualInput);
   const loss =
@@ -142,6 +186,20 @@ export default function GoldLedger() {
     }));
   }
 
+  async function persistWorker(worker, nextWorkerData) {
+    const { error } = await supabase
+      .from("gold_ledger")
+      .upsert(
+        {
+          worker,
+          data: nextWorkerData,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "worker" }
+      );
+    if (error) throw error;
+  }
+
   async function saveDay() {
     setActualError("");
     setSaveMsg("");
@@ -150,31 +208,16 @@ export default function GoldLedger() {
       return;
     }
     setSaving(true);
-    const record = {
+    const rawRecord = {
       date: dateInput,
-      prevWeight: cur.lastWeight,
       transactions: curDraft,
-      total: totalChange,
-      expected: hasBaseline ? expected : null,
       actual: actualNum,
-      loss: hasBaseline ? actualNum - expected : null,
+      exported: false,
     };
-    const nextWorkerData = {
-      lastWeight: actualNum,
-      history: [...cur.history, record],
-    };
+    const newHistory = recomputeChain([...cur.history, rawRecord]);
+    const nextWorkerData = { lastWeight: actualNum, history: newHistory };
     try {
-      const { error } = await supabase
-        .from("gold_ledger")
-        .upsert(
-          {
-            worker: activeWorker,
-            data: nextWorkerData,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: "worker" }
-        );
-      if (error) throw error;
+      await persistWorker(activeWorker, nextWorkerData);
       setData((d) => ({ ...d, [activeWorker]: nextWorkerData }));
       setDrafts((d) => ({ ...d, [activeWorker]: [] }));
       setActualInput("");
@@ -190,22 +233,12 @@ export default function GoldLedger() {
   async function undoLastDay() {
     if (cur.history.length === 0) return;
     setUndoing(true);
-    const newHistory = cur.history.slice(0, -1);
+    const newHistory = recomputeChain(cur.history.slice(0, -1));
     const prevWeight =
       newHistory.length > 0 ? newHistory[newHistory.length - 1].actual : null;
     const nextWorkerData = { lastWeight: prevWeight, history: newHistory };
     try {
-      const { error } = await supabase
-        .from("gold_ledger")
-        .upsert(
-          {
-            worker: activeWorker,
-            data: nextWorkerData,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: "worker" }
-        );
-      if (error) throw error;
+      await persistWorker(activeWorker, nextWorkerData);
       setData((d) => ({ ...d, [activeWorker]: nextWorkerData }));
       setSaveMsg("已撤销最近一天的记录");
     } catch {
@@ -216,11 +249,191 @@ export default function GoldLedger() {
     }
   }
 
-  const recentHistory = [...cur.history].slice(-14).reverse();
-  const cumulativeLoss = cur.history.reduce(
-    (s, r) => s + (r.loss || 0),
-    0
+  const recentHistory = useMemo(
+    () =>
+      cur.history
+        .map((r, i) => ({ ...r, _idx: i }))
+        .slice(-14)
+        .reverse(),
+    [cur.history]
   );
+  const cumulativeLoss = cur.history.reduce((s, r) => s + (r.loss || 0), 0);
+
+  // ---- 详情弹窗 ----
+  function openDetail(worker, idx) {
+    const record = data[worker].history[idx];
+    setShowDetail({ worker, index: idx });
+    setEditTransactions((record.transactions || []).map((t) => ({ ...t })));
+    setEditActual(String(record.actual));
+    setDetailDesc("");
+    setDetailAmount("");
+    setDetailDest("");
+    setDetailRowError("");
+    setDetailError("");
+  }
+
+  function closeDetail() {
+    setShowDetail(null);
+  }
+
+  function addDetailRow() {
+    const amt = parseFloat(detailAmount);
+    if (!detailDesc.trim()) {
+      setDetailRowError("请填写描述");
+      return;
+    }
+    if (detailAmount === "" || Number.isNaN(amt) || amt === 0) {
+      setDetailRowError("请填写有效的加减数量（不能为0）");
+      return;
+    }
+    setEditTransactions((list) => [
+      ...list,
+      { id: Date.now() + Math.random(), desc: detailDesc.trim(), amount: amt, dest: detailDest },
+    ]);
+    setDetailDesc("");
+    setDetailAmount("");
+    setDetailDest("");
+    setDetailRowError("");
+  }
+
+  function removeDetailRow(id) {
+    setEditTransactions((list) => list.filter((t) => t.id !== id));
+  }
+
+  async function saveDetailEdit() {
+    if (!showDetail) return;
+    const { worker, index } = showDetail;
+    const record = data[worker].history[index];
+    if (record.exported) return;
+    const num = parseFloat(editActual);
+    if (editActual === "" || Number.isNaN(num)) {
+      setDetailError("请填写有效的实重");
+      return;
+    }
+    setDetailSaving(true);
+    const newHistoryRaw = [...data[worker].history];
+    newHistoryRaw[index] = {
+      ...newHistoryRaw[index],
+      transactions: editTransactions,
+      actual: num,
+    };
+    const newHistory = recomputeChain(newHistoryRaw);
+    const lastWeight = newHistory.length
+      ? newHistory[newHistory.length - 1].actual
+      : null;
+    const nextWorkerData = { lastWeight, history: newHistory };
+    try {
+      await persistWorker(worker, nextWorkerData);
+      setData((d) => ({ ...d, [worker]: nextWorkerData }));
+      setShowDetail(null);
+    } catch {
+      setDetailError("保存失败，检查网络后重试");
+    } finally {
+      setDetailSaving(false);
+    }
+  }
+
+  // ---- 导出 / 归档 ----
+  const pendingCount = useMemo(() => {
+    let days = 0;
+    let lines = 0;
+    for (const w of WORKERS) {
+      const hist = data[w]?.history || [];
+      for (const r of hist) {
+        if (!r.exported) {
+          days += 1;
+          lines += (r.transactions || []).length;
+        }
+      }
+    }
+    return { days, lines };
+  }, [data]);
+
+  async function handleExport() {
+    setExporting(true);
+    setExportMsg("");
+    try {
+      const summaryRows = [];
+      const detailRows = [];
+      const keys = new Set();
+      for (const w of WORKERS) {
+        const hist = data[w]?.history || [];
+        hist.forEach((r) => {
+          if (r.exported) return;
+          keys.add(`${w}__${r.date}`);
+          summaryRows.push({
+            Worker: w,
+            日期: r.date,
+            要有: r.expected ?? "",
+            实重: r.actual,
+            损耗: r.loss ?? "",
+          });
+          (r.transactions || []).forEach((t) => {
+            detailRows.push({
+              Worker: w,
+              日期: r.date,
+              描述: t.desc,
+              "加减(g)": t.amount,
+              去向: t.dest || "",
+            });
+          });
+        });
+      }
+      if (summaryRows.length === 0) {
+        setExportMsg("没有还没导出过的记录");
+        setExporting(false);
+        return;
+      }
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), "每日汇总");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detailRows), "流水明细");
+      XLSX.writeFile(wb, `金重对账_${todayStr()}.xlsx`);
+      setPendingExportKeys(keys);
+      setExportMsg(
+        `已导出 ${summaryRows.length} 天、${detailRows.length} 条流水。确认文件保存好后，可以点下面按钮清空这批流水明细（汇总数字会保留）。`
+      );
+    } catch {
+      setExportMsg("导出失败，请重试");
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function handleClearExported() {
+    if (!pendingExportKeys) return;
+    setClearing(true);
+    try {
+      const nextDataLocal = { ...data };
+      const toPersist = [];
+      for (const w of WORKERS) {
+        const hist = data[w]?.history || [];
+        let changed = false;
+        const newHist = hist.map((r) => {
+          if (!r.exported && pendingExportKeys.has(`${w}__${r.date}`)) {
+            changed = true;
+            return { ...r, exported: true, transactions: [] };
+          }
+          return r;
+        });
+        if (changed) {
+          const nextWorkerData = { lastWeight: data[w].lastWeight, history: newHist };
+          nextDataLocal[w] = nextWorkerData;
+          toPersist.push({ worker: w, data: nextWorkerData });
+        }
+      }
+      for (const item of toPersist) {
+        await persistWorker(item.worker, item.data);
+      }
+      setData(nextDataLocal);
+      setPendingExportKeys(null);
+      setConfirmClear(false);
+      setExportMsg("已清空这批流水明细，每日汇总和累计损耗都还保留着。");
+    } catch {
+      setExportMsg("清空失败，检查网络后重试（已下载的Excel文件不受影响）");
+    } finally {
+      setClearing(false);
+    }
+  }
 
   if (!ready) {
     return (
@@ -230,6 +443,20 @@ export default function GoldLedger() {
       </div>
     );
   }
+
+  const detailRecord = showDetail ? data[showDetail.worker].history[showDetail.index] : null;
+  const detailDestinations = showDetail ? destinationsFor(showDetail.worker) : [];
+  const detailTotal = editTransactions.reduce((s, t) => s + t.amount, 0);
+  const detailActualNum = editActual === "" ? null : parseFloat(editActual);
+  const detailPrevWeight = detailRecord ? detailRecord.prevWeight : null;
+  const detailExpected =
+    detailPrevWeight !== null && detailPrevWeight !== undefined
+      ? detailPrevWeight + detailTotal
+      : null;
+  const detailLoss =
+    detailExpected !== null && detailActualNum !== null && !Number.isNaN(detailActualNum)
+      ? detailActualNum - detailExpected
+      : null;
 
   return (
     <div className="w-full bg-stone-950 text-stone-100 rounded-2xl border border-stone-800 p-5 md:p-8">
@@ -255,6 +482,62 @@ export default function GoldLedger() {
       <p className="text-xs text-stone-500 mb-4">
         数据存在Supabase数据库里，团队里打开这个网址的人看到的是同一份记录。
       </p>
+
+      <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
+        <h2 className="text-sm font-medium text-stone-300 mb-1 flex items-center gap-2">
+          <Archive className="w-4 h-4" />
+          导出与归档（全部worker）
+        </h2>
+        <p className="text-xs text-stone-500 mb-3">
+          还有 {pendingCount.days} 天、{pendingCount.lines} 条流水未导出。建议每7天导出一次备份。
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            className="flex items-center gap-2 bg-stone-800 hover:bg-stone-700 border border-stone-700 disabled:opacity-60 rounded-lg px-4 py-2 text-sm text-stone-100"
+          >
+            {exporting ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            导出Excel
+          </button>
+          {pendingExportKeys && (
+            <>
+              {confirmClear ? (
+                <>
+                  <span className="text-xs text-rose-400">
+                    确定清空这批明细？（汇总数字会保留）
+                  </span>
+                  <button
+                    onClick={handleClearExported}
+                    disabled={clearing}
+                    className="text-xs px-3 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/40 text-rose-400 disabled:opacity-60"
+                  >
+                    {clearing ? "清空中…" : "确认清空"}
+                  </button>
+                  <button
+                    onClick={() => setConfirmClear(false)}
+                    className="text-xs px-3 py-1.5 rounded-lg text-stone-500 hover:text-stone-300"
+                  >
+                    取消
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => setConfirmClear(true)}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-400 hover:text-stone-200"
+                >
+                  清空已导出明细
+                </button>
+              )}
+            </>
+          )}
+        </div>
+        {exportMsg && <p className="text-xs text-stone-400 mt-2">{exportMsg}</p>}
+      </div>
 
       <div className="flex gap-2 mb-6 border-b border-stone-800 pb-3">
         {WORKERS.map((w) => (
@@ -499,7 +782,7 @@ export default function GoldLedger() {
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-medium text-stone-300 flex items-center gap-2">
             <History className="w-4 h-4" />
-            历史记录（最近 {recentHistory.length} 天）
+            历史记录（最近 {recentHistory.length} 天，点日期看详情）
           </h2>
           {cur.history.length > 0 && (
             <div className="flex items-center gap-2">
@@ -552,12 +835,22 @@ export default function GoldLedger() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-800">
-                {recentHistory.map((r, i) => {
+                {recentHistory.map((r) => {
                   const over =
                     r.loss !== null && Math.abs(r.loss) > LOSS_THRESHOLD;
                   return (
-                    <tr key={i}>
-                      <td className="py-2 text-stone-400">{r.date}</td>
+                    <tr key={r._idx} className="hover:bg-stone-950/50">
+                      <td
+                        className="py-2 text-amber-400 hover:text-amber-300 cursor-pointer underline decoration-dotted"
+                        onClick={() => openDetail(activeWorker, r._idx)}
+                      >
+                        <span className="flex items-center gap-1">
+                          {r.date}
+                          {r.exported && (
+                            <Lock className="w-3 h-3 text-stone-600" />
+                          )}
+                        </span>
+                      </td>
                       <td className="py-2 text-right font-mono tabular-nums text-stone-300">
                         {r.expected === null ? "-" : fmtPlain(r.expected)}
                       </td>
@@ -595,6 +888,185 @@ export default function GoldLedger() {
           </div>
         )}
       </div>
+
+      {showDetail && detailRecord && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50"
+          onClick={closeDetail}
+        >
+          <div
+            className="bg-stone-900 border border-stone-700 rounded-2xl p-5 md:p-6 max-w-lg w-full max-h-[85vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-medium text-stone-200">
+                {showDetail.worker} · {detailRecord.date}
+              </h3>
+              <button
+                onClick={closeDetail}
+                className="text-stone-500 hover:text-stone-300"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {detailRecord.exported ? (
+              <div>
+                <div className="flex items-center gap-2 text-xs text-stone-500 bg-stone-800 rounded-lg px-3 py-2 mb-4">
+                  <Lock className="w-3.5 h-3.5" />
+                  这天的流水明细已经导出并清空，只能查看汇总，无法再编辑。
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
+                    <p className="text-xs text-stone-500 mb-1">要有</p>
+                    <p className="font-mono tabular-nums text-stone-200">
+                      {fmtPlain(detailRecord.expected)} g
+                    </p>
+                  </div>
+                  <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
+                    <p className="text-xs text-stone-500 mb-1">实重</p>
+                    <p className="font-mono tabular-nums text-stone-200">
+                      {fmtPlain(detailRecord.actual)} g
+                    </p>
+                  </div>
+                  <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
+                    <p className="text-xs text-stone-500 mb-1">损耗</p>
+                    <p className="font-mono tabular-nums text-stone-200">
+                      {fmt(detailRecord.loss)} g
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <div className="grid grid-cols-1 md:grid-cols-[1fr_100px_110px_auto] gap-2 mb-2">
+                  <input
+                    type="text"
+                    placeholder="描述"
+                    value={detailDesc}
+                    onChange={(e) => setDetailDesc(e.target.value)}
+                    className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500"
+                  />
+                  <input
+                    type="number"
+                    step="0.01"
+                    placeholder="+/- 克"
+                    value={detailAmount}
+                    onChange={(e) => setDetailAmount(e.target.value)}
+                    className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500 font-mono"
+                  />
+                  <select
+                    value={detailDest}
+                    onChange={(e) => setDetailDest(e.target.value)}
+                    className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                  >
+                    {detailDestinations.map((d) => (
+                      <option key={d} value={d}>
+                        {d === "" ? "去向" : d}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={addDetailRow}
+                    className="flex items-center justify-center gap-1 bg-stone-800 hover:bg-stone-700 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
+                {detailRowError && (
+                  <p className="text-xs text-rose-400 mb-2">{detailRowError}</p>
+                )}
+
+                {editTransactions.length === 0 ? (
+                  <p className="text-sm text-stone-600 py-3 text-center">
+                    这一天没有流水记录
+                  </p>
+                ) : (
+                  <div className="divide-y divide-stone-800 border-t border-stone-800 mb-4">
+                    {editTransactions.map((t) => (
+                      <div
+                        key={t.id}
+                        className="flex items-center justify-between py-2 text-sm"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-stone-300 truncate">{t.desc}</span>
+                          {t.dest && (
+                            <span className="text-xs text-stone-500 bg-stone-800 rounded px-2 py-0.5 shrink-0">
+                              {t.dest}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-3 shrink-0">
+                          <span
+                            className={
+                              "font-mono tabular-nums " +
+                              (t.amount > 0 ? "text-emerald-400" : "text-rose-400")
+                            }
+                          >
+                            {fmt(t.amount)} g
+                          </span>
+                          <button
+                            onClick={() => removeDetailRow(t.id)}
+                            className="text-stone-600 hover:text-rose-400"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <label className="block text-xs text-stone-500 mb-1">
+                  实重（克）
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={editActual}
+                  onChange={(e) => setEditActual(e.target.value)}
+                  className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-lg font-mono tabular-nums text-stone-100 focus:outline-none focus:border-amber-500 mb-3"
+                />
+
+                <div className="grid grid-cols-2 gap-3 mb-4">
+                  <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
+                    <p className="text-xs text-stone-500 mb-1">要有（预览）</p>
+                    <p className="font-mono tabular-nums text-stone-200">
+                      {detailExpected === null ? "-" : fmtPlain(detailExpected)} g
+                    </p>
+                  </div>
+                  <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
+                    <p className="text-xs text-stone-500 mb-1">损耗（预览）</p>
+                    <p className="font-mono tabular-nums text-stone-200">
+                      {detailLoss === null ? "-" : fmt(detailLoss)} g
+                    </p>
+                  </div>
+                </div>
+
+                <p className="text-xs text-stone-600 mb-3">
+                  保存后会自动重新计算这天之后每一天的"要有"和"损耗"。
+                </p>
+
+                {detailError && (
+                  <p className="text-xs text-rose-400 mb-2">{detailError}</p>
+                )}
+                <button
+                  onClick={saveDetailEdit}
+                  disabled={detailSaving}
+                  className="w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-stone-950 font-medium rounded-lg px-5 py-2.5 text-sm"
+                >
+                  {detailSaving ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Save className="w-4 h-4" />
+                  )}
+                  保存修改
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
