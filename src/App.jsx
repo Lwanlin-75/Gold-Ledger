@@ -18,6 +18,7 @@ import {
   Lock,
   Truck,
   ArrowLeftRight,
+  Users,
 } from "lucide-react";
 
 const WORKERS = ["JJ", "PD Lv2", "PD Lv1", "倒模", "Lv1倒模车花"];
@@ -33,7 +34,7 @@ const OTHER_DESTINATIONS = [
 const LOSS_THRESHOLD = 1; // 克，超过这个数就标红提醒
 
 const SPECIAL_KEYS = { SHIPMENTS: "__SHIPMENTS__", TRANSFERS: "__TRANSFERS__" };
-const SHIP_WORKERS = ["JJ", "PD Lv2"];
+const SHIP_WORKERS = ["JJ", "PD Lv2", "Lv1倒模车花"];
 const SHIP_TO = "PD门市";
 const SHIP_CATEGORIES = ["戒指", "链", "牌", "OTHER"];
 const DENOM_TOLERANCE = 0.03; // 克，GOLDBAR/GOLDBEAN 实重跟小计差超过这个数要二次确认
@@ -129,6 +130,14 @@ function recomputeChain(history) {
 }
 
 export default function GoldLedger() {
+  const [session, setSession] = useState(null);
+  const [role, setRole] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loginBusy, setLoginBusy] = useState(false);
+
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [data, setData] = useState(() =>
@@ -213,45 +222,120 @@ export default function GoldLedger() {
   const [confirmError, setConfirmError] = useState("");
   const [confirmSaving, setConfirmSaving] = useState(false);
 
+  // 账号管理（仅admin）
+  const [adminUsers, setAdminUsers] = useState([]);
+  const [adminUsersLoading, setAdminUsersLoading] = useState(false);
+  const [adminUsersError, setAdminUsersError] = useState("");
+  const [deletingUserId, setDeletingUserId] = useState(null);
+
+  const isAdmin = role === "admin";
+
   useEffect(() => {
     let cancelled = false;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!cancelled) setSession(data.session);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, sess) => {
+      setSession(sess);
+    });
+    return () => {
+      cancelled = true;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!session) {
+      setRole(null);
+      setAuthChecked(true);
+      return;
+    }
+    let cancelled = false;
+    supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", session.user.id)
+      .single()
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        setRole(error ? "user" : data?.role || "user");
+        setAuthChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    setLoginError("");
+    setLoginBusy(true);
+    const { error } = await supabase.auth.signInWithPassword({
+      email: loginEmail,
+      password: loginPassword,
+    });
+    if (error) setLoginError("登录失败：账号或密码不对");
+    setLoginBusy(false);
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    setReady(false);
+  }
+
+  async function refreshWorkerData(worker) {
+    const { data: rows, error } = await supabase.rpc("get_ledger_rows", {
+      p_keys: [worker],
+    });
+    if (error) return;
+    const row = (rows || [])[0];
+    setData((d) => ({
+      ...d,
+      [worker]: row ? { ...emptyWorkerData(), ...(row.data || {}) } : emptyWorkerData(),
+    }));
+  }
+
+  useEffect(() => {
+    if (!session || !role) return;
+    let cancelled = false;
     async function load() {
-      const allKeys = [...WORKERS, SPECIAL_KEYS.SHIPMENTS, SPECIAL_KEYS.TRANSFERS];
-      const { data: rows, error } = await supabase
-        .from("gold_ledger")
-        .select("worker, data")
-        .in("worker", allKeys);
+      const { data: rows, error } = await supabase.rpc("get_ledger_rows", {
+        p_keys: WORKERS,
+      });
       if (error) throw error;
       const next = Object.fromEntries(WORKERS.map((w) => [w, emptyWorkerData()]));
-      let nextShipments = emptyShipmentData();
-      let nextTransfers = emptyTransferData();
       for (const row of rows || []) {
-        if (row.worker === SPECIAL_KEYS.SHIPMENTS) {
-          nextShipments = { ...emptyShipmentData(), ...(row.data || {}) };
-        } else if (row.worker === SPECIAL_KEYS.TRANSFERS) {
-          nextTransfers = { ...emptyTransferData(), ...(row.data || {}) };
-        } else {
-          next[row.worker] = { ...emptyWorkerData(), ...(row.data || {}) };
-        }
+        next[row.worker] = { ...emptyWorkerData(), ...(row.data || {}) };
       }
+      const { data: shipRaw, error: shipErr } = await supabase.rpc("get_special_row", {
+        p_key: SPECIAL_KEYS.SHIPMENTS,
+      });
+      if (shipErr) throw shipErr;
+      const nextShipments = { ...emptyShipmentData(), ...(shipRaw || {}) };
+      const { data: transRaw, error: transErr } = await supabase.rpc("get_special_row", {
+        p_key: SPECIAL_KEYS.TRANSFERS,
+      });
+      if (transErr) throw transErr;
+      const nextTransfers = { ...emptyTransferData(), ...(transRaw || {}) };
       if (!cancelled) {
         setData(next);
         setShipmentData(nextShipments);
         setTransferData(nextTransfers);
         setThresholdDraft(String(nextTransfers.threshold ?? 0.05));
+        setShipThresholdDraft(String(nextShipments.threshold ?? 0.05));
         setReady(true);
       }
     }
     load().catch(() => {
       if (!cancelled) {
-        setLoadError("读取记录失败（检查网络或Supabase配置），先从空白开始，保存时会重试。");
+        setLoadError("读取记录失败（检查网络或权限），先从空白开始，保存时会重试。");
         setReady(true);
       }
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [session, role]);
 
   useEffect(() => {
     const type = transType === "OTHER" ? transTypeCustom.trim() || "转手" : transType;
@@ -295,8 +379,8 @@ export default function GoldLedger() {
       setRowError("请填写有效的加减数量（不能为0）");
       return;
     }
-    const item = { id: Date.now() + Math.random(), desc: descInput.trim(), amount: amt, dest: destInput };
-    updateWorkerDrafts(activeWorker, dateInput, (list) => [...list, item]);
+    const item = { id: String(Date.now() + Math.random()), desc: descInput.trim(), amount: amt, dest: destInput };
+    addDraftItemLocal(activeWorker, dateInput, item);
     setDescInput("");
     setAmountInput("");
     setDestInput("");
@@ -304,43 +388,56 @@ export default function GoldLedger() {
   }
 
   function removeRow(id) {
-    updateWorkerDrafts(activeWorker, dateInput, (list) => list.filter((t) => t.id !== id));
+    removeDraftItemLocal(activeWorker, dateInput, id);
   }
 
-  // 更新某个worker在某天的暂存流水，并存进数据库（跨设备同步用）
-  function updateWorkerDrafts(worker, date, updaterFn) {
+  // 加一条暂存流水（本地立即显示 + 后台走安全通道同步，user也能用）
+  function addDraftItemLocal(worker, date, item) {
     setData((d) => {
       const workerData = d[worker] || emptyWorkerData();
-      const currentList = (workerData.drafts && workerData.drafts[date]) || [];
-      const newList = updaterFn(currentList);
-      const nextDrafts = { ...(workerData.drafts || {}) };
-      if (newList.length === 0) {
-        delete nextDrafts[date];
-      } else {
-        nextDrafts[date] = newList;
-      }
-      const nextWorkerData = { ...workerData, drafts: nextDrafts };
-      persistRow(worker, nextWorkerData).catch(() => {
-        setSaveMsg("同步失败，检查网络（这条记录可能还没同步到其他设备）");
-      });
-      return { ...d, [worker]: nextWorkerData };
+      const list = (workerData.drafts && workerData.drafts[date]) || [];
+      const nextDrafts = { ...(workerData.drafts || {}), [date]: [...list, item] };
+      return { ...d, [worker]: { ...workerData, drafts: nextDrafts } };
+    });
+    supabase.rpc("upsert_draft_item", { p_worker: worker, p_date: date, p_item: item }).then(({ error }) => {
+      if (error) setSaveMsg("同步失败，检查网络（这条记录可能还没同步到其他设备）");
     });
   }
 
+  // 删一条暂存流水
+  function removeDraftItemLocal(worker, date, itemId) {
+    setData((d) => {
+      const workerData = d[worker] || emptyWorkerData();
+      const list = (workerData.drafts && workerData.drafts[date]) || [];
+      const filtered = list.filter((t) => t.id !== itemId);
+      const nextDrafts = { ...(workerData.drafts || {}) };
+      if (filtered.length === 0) delete nextDrafts[date];
+      else nextDrafts[date] = filtered;
+      return { ...d, [worker]: { ...workerData, drafts: nextDrafts } };
+    });
+    supabase
+      .rpc("remove_draft_item", { p_worker: worker, p_date: date, p_item_id: String(itemId) })
+      .then(({ error }) => {
+        if (error) setSaveMsg("同步失败，检查网络（这条记录可能还没同步到其他设备）");
+      });
+  }
+
+  // 整包写回只给 admin 用（撤销、编辑历史、导出后清空、改阈值等）
   async function persistRow(key, nextData) {
-    const { error } = await supabase
-      .from("gold_ledger")
-      .upsert(
-        {
-          worker: key,
-          data: nextData,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "worker" }
-      );
+    if (!isAdmin) throw new Error("not authorized");
+    const { error } = await supabase.rpc("admin_upsert_row", {
+      p_worker: key,
+      p_data: nextData,
+    });
     if (error) throw error;
   }
   const persistWorker = persistRow;
+
+  async function refreshSpecialData(key, setter, emptyFn) {
+    const { data: raw, error } = await supabase.rpc("get_special_row", { p_key: key });
+    if (error) return;
+    setter({ ...emptyFn(), ...(raw || {}) });
+  }
 
   // ---- 出货记录 ----
   function addShipItem() {
@@ -378,6 +475,7 @@ export default function GoldLedger() {
   }
 
   async function saveShipThreshold() {
+    if (!isAdmin) return;
     const t = parseFloat(shipThresholdDraft);
     if (Number.isNaN(t) || t < 0) return;
     const nextData = { ...shipmentData, threshold: t };
@@ -422,9 +520,9 @@ export default function GoldLedger() {
     const sentTotal = items.reduce((s, i) => s + i.weight, 0);
     const serialNum = shipmentData.nextSerial || 2608081;
     const serial = "HQ" + serialNum;
-    const sentItemId = Date.now() + Math.random();
+    const sentItemId = String(Date.now() + Math.random());
     const record = {
-      id: Date.now() + Math.random(),
+      id: String(Date.now() + Math.random()),
       serial,
       fromWorker: shipFrom,
       toWorker: SHIP_TO,
@@ -439,23 +537,21 @@ export default function GoldLedger() {
       confirmWeight: null,
       diff: null,
     };
-    const nextData = {
-      ...shipmentData,
-      nextSerial: serialNum + 1,
-      history: [...shipmentData.history, record],
-    };
-    updateWorkerDrafts(shipFrom, shipDate, (list) => [
-      ...list,
-      {
-        id: sentItemId,
-        desc: `${shipFlowDesc.trim()} (${serial})`,
-        amount: -sentTotal,
-        dest: SHIP_TO,
-      },
-    ]);
+    addDraftItemLocal(shipFrom, shipDate, {
+      id: sentItemId,
+      desc: `${shipFlowDesc.trim()} (${serial})`,
+      amount: -sentTotal,
+      dest: SHIP_TO,
+    });
     try {
-      await persistRow(SPECIAL_KEYS.SHIPMENTS, nextData);
-      setShipmentData(nextData);
+      const { error } = await supabase.rpc("append_special_record", {
+        p_key: SPECIAL_KEYS.SHIPMENTS,
+        p_record: record,
+        p_counter_field: "nextSerial",
+        p_counter_increment: 1,
+      });
+      if (error) throw error;
+      await refreshSpecialData(SPECIAL_KEYS.SHIPMENTS, setShipmentData, emptyShipmentData);
       setShipItems([]);
       setGoldbarQty({});
       setGoldbeanQty({});
@@ -490,20 +586,19 @@ export default function GoldLedger() {
       return;
     }
     setShipConfirmSaving(true);
-    const updated = {
-      ...record,
-      status: "confirmed",
-      confirmDate: shipConfirmDate,
-      confirmWeight: w,
-      diff: w - record.sentTotal,
-    };
-    const nextHistory = shipmentData.history.map((r) =>
-      r.id === shipConfirmingId ? updated : r
-    );
-    const nextData = { ...shipmentData, history: nextHistory };
     try {
-      await persistRow(SPECIAL_KEYS.SHIPMENTS, nextData);
-      setShipmentData(nextData);
+      const { error } = await supabase.rpc("update_special_record", {
+        p_key: SPECIAL_KEYS.SHIPMENTS,
+        p_record_id: record.id,
+        p_patch: {
+          status: "confirmed",
+          confirmDate: shipConfirmDate,
+          confirmWeight: w,
+          diff: w - record.sentTotal,
+        },
+      });
+      if (error) throw error;
+      await refreshSpecialData(SPECIAL_KEYS.SHIPMENTS, setShipmentData, emptyShipmentData);
       setShipConfirmingId(null);
     } catch {
       setShipConfirmError("保存失败，检查网络后重试");
@@ -513,23 +608,61 @@ export default function GoldLedger() {
   }
 
   function deleteShipmentRecord(record) {
+    if (!isAdmin) return;
     const msg =
       record.status === "pending"
         ? "确定取消这笔待确认的出货？（已写进流水的那条也会撤销）"
         : "确定删除这条已确认的出货记录？";
     if (!window.confirm(msg)) return;
     if (record.sentItemId) {
-      updateWorkerDrafts(record.fromWorker, record.date, (list) =>
-        list.filter((t) => t.id !== record.sentItemId)
-      );
+      removeDraftItemLocal(record.fromWorker, record.date, record.sentItemId);
     }
-    const nextData = {
-      ...shipmentData,
-      history: shipmentData.history.filter((r) => r.id !== record.id),
-    };
-    persistRow(SPECIAL_KEYS.SHIPMENTS, nextData)
-      .then(() => setShipmentData(nextData))
-      .catch(() => setShipMsg("删除失败，检查网络后重试"));
+    supabase
+      .rpc("admin_delete_special_record", { p_key: SPECIAL_KEYS.SHIPMENTS, p_record_id: record.id })
+      .then(({ error }) => {
+        if (error) {
+          setShipMsg("删除失败，检查网络后重试");
+        } else {
+          refreshSpecialData(SPECIAL_KEYS.SHIPMENTS, setShipmentData, emptyShipmentData);
+        }
+      });
+  }
+
+  async function loadAdminUsers() {
+    setAdminUsersLoading(true);
+    setAdminUsersError("");
+    const { data: rows, error } = await supabase
+      .from("profiles")
+      .select("id, email, role, created_at")
+      .order("created_at", { ascending: true });
+    if (error) {
+      setAdminUsersError("读取账号列表失败");
+    } else {
+      setAdminUsers(rows || []);
+    }
+    setAdminUsersLoading(false);
+  }
+
+  useEffect(() => {
+    if (view === "admin" && isAdmin) {
+      loadAdminUsers();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, isAdmin]);
+
+  async function deleteUser(userId) {
+    if (!window.confirm("确定删除这个账号？删除后这个人就没法登录了。")) return;
+    setDeletingUserId(userId);
+    setAdminUsersError("");
+    const { error } = await supabase.functions.invoke("delete-user", {
+      body: { user_id: userId },
+    });
+    if (error) {
+      setAdminUsersError("删除失败：后台删除账号的功能还没部署，需要先部署 Edge Function");
+    } else {
+      await loadAdminUsers();
+    }
+    setDeletingUserId(null);
   }
 
   const pendingShipments = useMemo(
@@ -550,6 +683,7 @@ export default function GoldLedger() {
 
   // ---- 转手核对 ----
   async function saveThreshold() {
+    if (!isAdmin) return;
     const t = parseFloat(thresholdDraft);
     if (Number.isNaN(t) || t < 0) return;
     const nextData = { ...transferData, threshold: t };
@@ -584,9 +718,9 @@ export default function GoldLedger() {
       return;
     }
     setTransSaving(true);
-    const sentItemId = Date.now() + Math.random();
+    const sentItemId = String(Date.now() + Math.random());
     const record = {
-      id: Date.now() + Math.random(),
+      id: String(Date.now() + Math.random()),
       type,
       fromWorker: transFrom,
       toWorker: transTo,
@@ -601,14 +735,19 @@ export default function GoldLedger() {
       status: "pending",
       diff: null,
     };
-    const nextData = { ...transferData, history: [...transferData.history, record] };
-    updateWorkerDrafts(transFrom, transSentDate, (list) => [
-      ...list,
-      { id: sentItemId, desc: transSentDesc.trim(), amount: -weight, dest: transTo },
-    ]);
+    addDraftItemLocal(transFrom, transSentDate, {
+      id: sentItemId,
+      desc: transSentDesc.trim(),
+      amount: -weight,
+      dest: transTo,
+    });
     try {
-      await persistRow(SPECIAL_KEYS.TRANSFERS, nextData);
-      setTransferData(nextData);
+      const { error } = await supabase.rpc("append_special_record", {
+        p_key: SPECIAL_KEYS.TRANSFERS,
+        p_record: record,
+      });
+      if (error) throw error;
+      await refreshSpecialData(SPECIAL_KEYS.TRANSFERS, setTransferData, emptyTransferData);
       setTransSentWeight("");
       setTransMsg(`已保存送出方重量，已经写进 ${transFrom} 当天流水，等 ${transTo} 收到后来确认。`);
     } catch {
@@ -641,27 +780,28 @@ export default function GoldLedger() {
       return;
     }
     setConfirmSaving(true);
-    const receivedItemId = Date.now() + Math.random();
-    const updatedRecord = {
-      ...record,
-      receivedDate: confirmDate,
-      receivedWeight: weight,
-      receivedDesc: confirmDesc.trim(),
-      receivedItemId,
-      status: "confirmed",
-      diff: weight - record.sentWeight,
-    };
-    const nextHistory = transferData.history.map((r) =>
-      r.id === confirmingId ? updatedRecord : r
-    );
-    const nextData = { ...transferData, history: nextHistory };
-    updateWorkerDrafts(record.toWorker, confirmDate, (list) => [
-      ...list,
-      { id: receivedItemId, desc: confirmDesc.trim(), amount: weight, dest: record.fromWorker },
-    ]);
+    const receivedItemId = String(Date.now() + Math.random());
+    addDraftItemLocal(record.toWorker, confirmDate, {
+      id: receivedItemId,
+      desc: confirmDesc.trim(),
+      amount: weight,
+      dest: record.fromWorker,
+    });
     try {
-      await persistRow(SPECIAL_KEYS.TRANSFERS, nextData);
-      setTransferData(nextData);
+      const { error } = await supabase.rpc("update_special_record", {
+        p_key: SPECIAL_KEYS.TRANSFERS,
+        p_record_id: record.id,
+        p_patch: {
+          receivedDate: confirmDate,
+          receivedWeight: weight,
+          receivedDesc: confirmDesc.trim(),
+          receivedItemId,
+          status: "confirmed",
+          diff: weight - record.sentWeight,
+        },
+      });
+      if (error) throw error;
+      await refreshSpecialData(SPECIAL_KEYS.TRANSFERS, setTransferData, emptyTransferData);
       setConfirmingId(null);
     } catch {
       setConfirmError("保存失败，检查网络后重试");
@@ -671,28 +811,27 @@ export default function GoldLedger() {
   }
 
   function deleteTransferRecord(record) {
+    if (!isAdmin) return;
     const msg =
       record.status === "pending"
         ? "确定取消这笔待确认的核对？（已经写进送出方流水的那条也会一起撤销）"
         : "确定删除这条已确认的核对记录？（如果对应流水已经存档保存过，需要去对账页面手动调整）";
     if (!window.confirm(msg)) return;
     if (record.sentItemId) {
-      updateWorkerDrafts(record.fromWorker, record.sentDate, (list) =>
-        list.filter((t) => t.id !== record.sentItemId)
-      );
+      removeDraftItemLocal(record.fromWorker, record.sentDate, record.sentItemId);
     }
     if (record.receivedItemId) {
-      updateWorkerDrafts(record.toWorker, record.receivedDate, (list) =>
-        list.filter((t) => t.id !== record.receivedItemId)
-      );
+      removeDraftItemLocal(record.toWorker, record.receivedDate, record.receivedItemId);
     }
-    const nextData = {
-      ...transferData,
-      history: transferData.history.filter((r) => r.id !== record.id),
-    };
-    persistRow(SPECIAL_KEYS.TRANSFERS, nextData)
-      .then(() => setTransferData(nextData))
-      .catch(() => setTransMsg("删除失败，检查网络后重试"));
+    supabase
+      .rpc("admin_delete_special_record", { p_key: SPECIAL_KEYS.TRANSFERS, p_record_id: record.id })
+      .then(({ error }) => {
+        if (error) {
+          setTransMsg("删除失败，检查网络后重试");
+        } else {
+          refreshSpecialData(SPECIAL_KEYS.TRANSFERS, setTransferData, emptyTransferData);
+        }
+      });
   }
 
   const pendingTransfers = useMemo(
@@ -718,36 +857,32 @@ export default function GoldLedger() {
       return;
     }
     setSaving(true);
-    const rawRecord = {
-      date: dateInput,
-      transactions: curDraft,
-      actual: actualNum,
-      exported: false,
-    };
-    const newHistory = recomputeChain([...cur.history, rawRecord]);
-    const nextDrafts = { ...(cur.drafts || {}) };
-    delete nextDrafts[dateInput];
-    const nextWorkerData = { lastWeight: actualNum, history: newHistory, drafts: nextDrafts };
     try {
-      await persistWorker(activeWorker, nextWorkerData);
-      setData((d) => ({ ...d, [activeWorker]: nextWorkerData }));
+      const { error } = await supabase.rpc("save_day", {
+        p_worker: activeWorker,
+        p_date: dateInput,
+        p_actual: actualNum,
+      });
+      if (error) throw error;
+      await refreshWorkerData(activeWorker);
       setActualInput("");
       setDateInput(todayStr());
       setSaveMsg("已保存这一天的记录");
     } catch {
-      setSaveMsg("保存失败，检查网络或Supabase配置，请重试一次");
+      setSaveMsg("保存失败，检查网络或权限，请重试一次");
     } finally {
       setSaving(false);
     }
   }
 
   async function undoLastDay() {
+    if (!isAdmin) return;
     if (cur.history.length === 0) return;
     setUndoing(true);
     const newHistory = recomputeChain(cur.history.slice(0, -1));
     const prevWeight =
       newHistory.length > 0 ? newHistory[newHistory.length - 1].actual : null;
-    const nextWorkerData = { lastWeight: prevWeight, history: newHistory };
+    const nextWorkerData = { lastWeight: prevWeight, history: newHistory, drafts: cur.drafts || {} };
     try {
       await persistWorker(activeWorker, nextWorkerData);
       setData((d) => ({ ...d, [activeWorker]: nextWorkerData }));
@@ -812,6 +947,7 @@ export default function GoldLedger() {
   }
 
   async function saveDetailEdit() {
+    if (!isAdmin) return;
     if (!showDetail) return;
     const { worker, index } = showDetail;
     const record = data[worker].history[index];
@@ -832,7 +968,7 @@ export default function GoldLedger() {
     const lastWeight = newHistory.length
       ? newHistory[newHistory.length - 1].actual
       : null;
-    const nextWorkerData = { lastWeight, history: newHistory };
+    const nextWorkerData = { lastWeight, history: newHistory, drafts: data[worker].drafts || {} };
     try {
       await persistWorker(worker, nextWorkerData);
       setData((d) => ({ ...d, [worker]: nextWorkerData }));
@@ -911,6 +1047,7 @@ export default function GoldLedger() {
   }
 
   async function handleClearExported() {
+    if (!isAdmin) return;
     if (!pendingExportKeys) return;
     setClearing(true);
     try {
@@ -927,7 +1064,7 @@ export default function GoldLedger() {
           return r;
         });
         if (changed) {
-          const nextWorkerData = { lastWeight: data[w].lastWeight, history: newHist };
+          const nextWorkerData = { lastWeight: data[w].lastWeight, history: newHist, drafts: data[w].drafts || {} };
           nextDataLocal[w] = nextWorkerData;
           toPersist.push({ worker: w, data: nextWorkerData });
         }
@@ -946,9 +1083,60 @@ export default function GoldLedger() {
     }
   }
 
+  if (!authChecked) {
+    return (
+      <div className="min-h-[300px] flex items-center justify-center text-stone-400 bg-stone-950 rounded-2xl">
+        <Loader2 className="w-5 h-5 animate-spin mr-2" />
+        正在检查登录状态…
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <div className="w-full max-w-sm mx-auto bg-stone-950 text-stone-100 rounded-2xl border border-stone-800 p-6">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
+            <Scale className="w-5 h-5 text-amber-400" />
+          </div>
+          <div>
+            <h1 className="text-lg font-semibold text-stone-100 tracking-wide">金重对账</h1>
+            <p className="text-xs text-stone-500">请登录</p>
+          </div>
+        </div>
+        <form onSubmit={handleLogin}>
+          <label className="block text-xs text-stone-500 mb-1">账号</label>
+          <input
+            type="text"
+            value={loginEmail}
+            onChange={(e) => setLoginEmail(e.target.value)}
+            className="w-full bg-stone-900 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500 mb-3"
+            autoCapitalize="off"
+          />
+          <label className="block text-xs text-stone-500 mb-1">密码</label>
+          <input
+            type="password"
+            value={loginPassword}
+            onChange={(e) => setLoginPassword(e.target.value)}
+            className="w-full bg-stone-900 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500 mb-3"
+          />
+          {loginError && <p className="text-xs text-rose-400 mb-3">{loginError}</p>}
+          <button
+            type="submit"
+            disabled={loginBusy}
+            className="w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-stone-950 font-medium rounded-lg px-5 py-2.5 text-sm"
+          >
+            {loginBusy && <Loader2 className="w-4 h-4 animate-spin" />}
+            登录
+          </button>
+        </form>
+      </div>
+    );
+  }
+
   if (!ready) {
     return (
-      <div className="min-h-[300px] flex items-center justify-center text-stone-400">
+      <div className="min-h-[300px] flex items-center justify-center text-stone-400 bg-stone-950 rounded-2xl">
         <Loader2 className="w-5 h-5 animate-spin mr-2" />
         正在加载记录…
       </div>
@@ -988,13 +1176,41 @@ export default function GoldLedger() {
             {loadError}
           </div>
         )}
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-stone-500">
+            {session.user.email}
+            <span
+              className={
+                "ml-1.5 px-1.5 py-0.5 rounded text-[10px] " +
+                (isAdmin
+                  ? "bg-amber-500/20 text-amber-400"
+                  : "bg-stone-800 text-stone-400")
+              }
+            >
+              {isAdmin ? "admin" : "user"}
+            </span>
+          </span>
+          <button
+            onClick={handleLogout}
+            className="text-xs px-2 py-1 rounded-lg text-stone-500 hover:text-stone-300"
+          >
+            退出
+          </button>
+        </div>
       </div>
+
+      {!isAdmin && (
+        <p className="text-xs text-stone-600 mb-4">
+          你是普通账号，只能看到最近3天的记录；导出、撤销、编辑历史等功能只有管理员能用。
+        </p>
+      )}
 
       <div className="flex gap-2 mb-6">
         {[
           { key: "workers", label: "对账", icon: Scale },
           { key: "shipments", label: "出货记录", icon: Truck },
           { key: "transfers", label: "转手核对", icon: ArrowLeftRight },
+          ...(isAdmin ? [{ key: "admin", label: "账号管理", icon: Users }] : []),
         ].map((v) => (
           <button
             key={v.key}
@@ -2403,6 +2619,85 @@ export default function GoldLedger() {
             )}
           </div>
         </>
+      )}
+
+      {view === "admin" && isAdmin && (
+        <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-medium text-stone-300 flex items-center gap-2">
+              <Users className="w-4 h-4" />
+              账号管理（{adminUsers.length}）
+            </h2>
+            <button
+              onClick={loadAdminUsers}
+              disabled={adminUsersLoading}
+              className="text-xs px-3 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-400 hover:text-stone-200 disabled:opacity-60"
+            >
+              {adminUsersLoading ? "刷新中…" : "刷新"}
+            </button>
+          </div>
+          {adminUsersError && (
+            <p className="text-xs text-rose-400 mb-3">{adminUsersError}</p>
+          )}
+          {adminUsers.length === 0 ? (
+            <p className="text-sm text-stone-600 py-4 text-center">
+              {adminUsersLoading ? "加载中…" : "还没有账号"}
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs text-stone-500 border-b border-stone-800">
+                    <th className="text-left py-2 font-normal">账号</th>
+                    <th className="text-left py-2 font-normal">角色</th>
+                    <th className="text-left py-2 font-normal">建立时间</th>
+                    <th className="text-right py-2 font-normal"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-stone-800">
+                  {adminUsers.map((u) => (
+                    <tr key={u.id}>
+                      <td className="py-2 text-stone-300">{u.email}</td>
+                      <td className="py-2">
+                        <span
+                          className={
+                            "px-1.5 py-0.5 rounded text-[10px] " +
+                            (u.role === "admin"
+                              ? "bg-amber-500/20 text-amber-400"
+                              : "bg-stone-800 text-stone-400")
+                          }
+                        >
+                          {u.role}
+                        </span>
+                      </td>
+                      <td className="py-2 text-stone-500 text-xs">
+                        {(u.created_at || "").slice(0, 10)}
+                      </td>
+                      <td className="py-2 text-right">
+                        {u.id !== session.user.id && (
+                          <button
+                            onClick={() => deleteUser(u.id)}
+                            disabled={deletingUserId === u.id}
+                            className="text-stone-600 hover:text-rose-400 disabled:opacity-50"
+                          >
+                            {deletingUserId === u.id ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="w-4 h-4" />
+                            )}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="text-xs text-stone-600 mt-3">
+            新建账号请去 Supabase 后台 Authentication → Users → Add user。删除需要先部署好 Edge Function（见下方说明）。
+          </p>
+        </div>
       )}
     </div>
   );
