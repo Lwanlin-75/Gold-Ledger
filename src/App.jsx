@@ -32,6 +32,11 @@ const OTHER_DESTINATIONS = [
   "OTHER",
 ];
 const LOSS_THRESHOLD = 1; // 克，超过这个数就标红提醒
+// 过秤时是连盒子一起秤的，这里是盒重的默认起始值，实际值可以在网页里改，不是写死的
+const BOX_WEIGHT_DEFAULTS = { JJ: 200.38, "PD Lv1": 212.37, "PD Lv2": 722.42 };
+function defaultBoxWeight(worker) {
+  return BOX_WEIGHT_DEFAULTS[worker] ?? 0;
+}
 
 const SPECIAL_KEYS = { SHIPMENTS: "__SHIPMENTS__", TRANSFERS: "__TRANSFERS__" };
 const SHIP_WORKERS = ["JJ", "PD Lv2", "Lv1车花"];
@@ -149,6 +154,8 @@ export default function GoldLedger() {
   const [destInput, setDestInput] = useState("");
   const [rowError, setRowError] = useState("");
   const [actualInput, setActualInput] = useState("");
+  const [boxWeightDraft, setBoxWeightDraft] = useState("");
+  const [recoverInput, setRecoverInput] = useState("0");
   const [actualError, setActualError] = useState("");
   const [dateInput, setDateInput] = useState(todayStr());
   const [saving, setSaving] = useState(false);
@@ -355,6 +362,35 @@ export default function GoldLedger() {
   const goldbeanState = calcDenomState(goldbeanQty, goldbeanActual);
 
   const cur = data[activeWorker] || emptyWorkerData();
+
+  useEffect(() => {
+    if (!ready) return;
+    const bw = cur.boxWeight != null ? cur.boxWeight : defaultBoxWeight(activeWorker);
+    setBoxWeightDraft(String(bw));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeWorker, ready]);
+
+  async function saveBoxWeight() {
+    if (!isAdmin) return;
+    const v = parseFloat(boxWeightDraft);
+    if (Number.isNaN(v) || v < 0) return;
+    try {
+      const { error } = await supabase.rpc("update_special_field", {
+        p_key: activeWorker,
+        p_field: "boxWeight",
+        p_value: v,
+      });
+      if (error) throw error;
+      setData((d) => ({
+        ...d,
+        [activeWorker]: { ...(d[activeWorker] || emptyWorkerData()), boxWeight: v },
+      }));
+      setSaveMsg("已更新盒重");
+    } catch {
+      setSaveMsg("更新盒重失败，检查网络后重试");
+    }
+  }
+
   const curDraft = (cur.drafts && cur.drafts[dateInput]) || [];
   const totalChange = useMemo(
     () => curDraft.reduce((s, t) => s + t.amount, 0),
@@ -364,7 +400,13 @@ export default function GoldLedger() {
   const expected = hasBaseline ? cur.lastWeight + totalChange : null;
   const destinations = useMemo(() => destinationsFor(activeWorker), [activeWorker]);
 
-  const actualNum = actualInput === "" ? null : parseFloat(actualInput);
+  const rawScaleNum = actualInput === "" ? null : parseFloat(actualInput);
+  const boxWeightNum = boxWeightDraft === "" ? 0 : parseFloat(boxWeightDraft) || 0;
+  const recoverNum = recoverInput === "" ? 0 : parseFloat(recoverInput) || 0;
+  const actualNum =
+    rawScaleNum !== null && !Number.isNaN(rawScaleNum)
+      ? rawScaleNum - boxWeightNum + recoverNum
+      : null;
   const loss =
     hasBaseline && actualNum !== null && !Number.isNaN(actualNum)
       ? actualNum - expected
@@ -856,8 +898,8 @@ export default function GoldLedger() {
   async function saveDay() {
     setActualError("");
     setSaveMsg("");
-    if (actualInput === "" || Number.isNaN(actualNum)) {
-      setActualError("请填写这一天过秤读到的实重");
+    if (actualInput === "" || Number.isNaN(rawScaleNum)) {
+      setActualError("请填写这一天过秤读到的重量");
       return;
     }
     setSaving(true);
@@ -870,6 +912,7 @@ export default function GoldLedger() {
       if (error) throw error;
       await refreshWorkerData(activeWorker);
       setActualInput("");
+      setRecoverInput("0");
       setDateInput(todayStr());
       setSaveMsg("已保存这一天的记录");
     } catch {
@@ -1462,19 +1505,63 @@ export default function GoldLedger() {
       <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
         <h2 className="text-sm font-medium text-stone-300 mb-3">过秤结算</h2>
 
-        <div>
-          <label className="block text-xs text-stone-500 mb-1">
-            实重（{dateInput} 过秤读数，克）
-          </label>
-          <input
-            type="number"
-            step="0.01"
-            placeholder="从秤上读到的数字"
-            value={actualInput}
-            onChange={(e) => setActualInput(e.target.value)}
-            className="w-full md:w-72 bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-lg font-mono tabular-nums text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500"
-          />
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+          <div>
+            <label className="block text-xs text-stone-500 mb-1">
+              过秤读数（{dateInput}，连盒子，克）
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              placeholder="从秤上读到的数字"
+              value={actualInput}
+              onChange={(e) => setActualInput(e.target.value)}
+              className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-lg font-mono tabular-nums text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-stone-500 mb-1">盒子重量（克）</label>
+            {isAdmin ? (
+              <div className="flex gap-1.5">
+                <input
+                  type="number"
+                  step="0.01"
+                  value={boxWeightDraft}
+                  onChange={(e) => setBoxWeightDraft(e.target.value)}
+                  className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm font-mono tabular-nums text-stone-100 focus:outline-none focus:border-amber-500"
+                />
+                <button
+                  onClick={saveBoxWeight}
+                  className="shrink-0 text-xs px-3 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
+                >
+                  更新
+                </button>
+              </div>
+            ) : (
+              <div className="w-full bg-stone-950 border border-stone-800 rounded-lg px-3 py-2 text-sm font-mono tabular-nums text-stone-500">
+                {fmtPlain(parseFloat(boxWeightDraft) || 0)}（只有admin能改）
+              </div>
+            )}
+          </div>
+          <div>
+            <label className="block text-xs text-stone-500 mb-1">
+              找回重量（没有就是0，克）
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              value={recoverInput}
+              onChange={(e) => setRecoverInput(e.target.value)}
+              className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm font-mono tabular-nums text-stone-100 focus:outline-none focus:border-amber-500"
+            />
+          </div>
         </div>
+        {actualNum !== null && !Number.isNaN(actualNum) && (
+          <p className="text-xs text-stone-500 mb-2">
+            算入损耗的实重 = 过秤读数 − 盒重 + 找回 ={" "}
+            <span className="text-stone-300 font-mono">{fmtPlain(actualNum)} g</span>
+          </p>
+        )}
         {actualError && (
           <p className="text-xs text-rose-400 mt-2">{actualError}</p>
         )}
