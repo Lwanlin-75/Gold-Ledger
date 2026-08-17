@@ -21,7 +21,7 @@ import {
   Users,
 } from "lucide-react";
 
-const WORKERS = ["JJ", "PD Lv2", "PD Lv1", "倒模", "Lv1倒模车花"];
+const WORKERS = ["JJ", "PD Lv2", "PD Lv1", "倒模", "Lv1车花", "Lv1倒模"];
 const OTHER_DESTINATIONS = [
   "老板",
   "现货",
@@ -34,7 +34,7 @@ const OTHER_DESTINATIONS = [
 const LOSS_THRESHOLD = 1; // 克，超过这个数就标红提醒
 
 const SPECIAL_KEYS = { SHIPMENTS: "__SHIPMENTS__", TRANSFERS: "__TRANSFERS__" };
-const SHIP_WORKERS = ["JJ", "PD Lv2", "Lv1倒模车花"];
+const SHIP_WORKERS = ["JJ", "PD Lv2", "Lv1车花"];
 const SHIP_TO = "PD门市";
 const SHIP_CATEGORIES = ["戒指", "链", "牌", "OTHER"];
 const DENOM_TOLERANCE = 0.03; // 克，GOLDBAR/GOLDBEAN 实重跟小计差超过这个数要二次确认
@@ -167,6 +167,7 @@ export default function GoldLedger() {
   const [showDetail, setShowDetail] = useState(null); // { worker, index } | null
   const [editTransactions, setEditTransactions] = useState([]);
   const [editActual, setEditActual] = useState("");
+  const [editDate, setEditDate] = useState("");
   const [detailDesc, setDetailDesc] = useState("");
   const [detailAmount, setDetailAmount] = useState("");
   const [detailDest, setDetailDest] = useState("");
@@ -914,6 +915,7 @@ export default function GoldLedger() {
     setShowDetail({ worker, index: idx });
     setEditTransactions((record.transactions || []).map((t) => ({ ...t })));
     setEditActual(String(record.actual));
+    setEditDate(record.date);
     setDetailDesc("");
     setDetailAmount("");
     setDetailDest("");
@@ -960,12 +962,17 @@ export default function GoldLedger() {
       setDetailError("请填写有效的实重");
       return;
     }
+    if (!editDate) {
+      setDetailError("请选择日期");
+      return;
+    }
     setDetailSaving(true);
     const newHistoryRaw = [...data[worker].history];
     newHistoryRaw[index] = {
       ...newHistoryRaw[index],
       transactions: editTransactions,
       actual: num,
+      date: editDate,
     };
     const newHistory = recomputeChain(newHistoryRaw);
     const lastWeight = newHistory.length
@@ -1771,16 +1778,29 @@ export default function GoldLedger() {
                   </div>
                 )}
 
-                <label className="block text-xs text-stone-500 mb-1">
-                  实重（克）
-                </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={editActual}
-                  onChange={(e) => setEditActual(e.target.value)}
-                  className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-lg font-mono tabular-nums text-stone-100 focus:outline-none focus:border-amber-500 mb-3"
-                />
+                <div className="grid grid-cols-2 gap-2 mb-3">
+                  <div>
+                    <label className="block text-xs text-stone-500 mb-1">日期</label>
+                    <input
+                      type="date"
+                      value={editDate}
+                      onChange={(e) => setEditDate(e.target.value)}
+                      className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-stone-500 mb-1">
+                      实重（克）
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editActual}
+                      onChange={(e) => setEditActual(e.target.value)}
+                      className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-lg font-mono tabular-nums text-stone-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                </div>
 
                 <div className="grid grid-cols-2 gap-3 mb-4">
                   <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
