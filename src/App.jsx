@@ -1352,37 +1352,45 @@ export default function GoldLedger() {
 
   return (
     <div className="w-full bg-stone-950 text-stone-100 rounded-2xl border border-stone-800 p-5 md:p-8">
-      <div className="flex items-center justify-between flex-wrap gap-3 mb-6">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
-            <Scale className="w-5 h-5 text-amber-400" />
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-6">
+        <div className="flex items-center justify-between md:justify-start gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 shrink-0 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
+              <Scale className="w-5 h-5 text-amber-400" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="text-lg font-semibold text-stone-100 tracking-wide truncate">
+                {t("金重对账", "Gold Ledger")}
+              </h1>
+              <p className="text-xs text-stone-500 truncate">
+                {t("每天过秤，自动算损耗", "Weigh daily, loss calculated automatically")}
+              </p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-lg font-semibold text-stone-100 tracking-wide">
-              {t("金重对账", "Gold Ledger")}
-            </h1>
-            <p className="text-xs text-stone-500">
-              {t("每天过秤，自动算损耗", "Weigh daily, loss calculated automatically")}
-            </p>
-          </div>
+          <button
+            onClick={toggleLang}
+            className="md:hidden shrink-0 text-xs px-2.5 py-1.5 rounded-lg border border-stone-700 text-stone-400 hover:text-stone-200"
+          >
+            {lang === "zh" ? "EN" : "中"}
+          </button>
         </div>
         {loadError && (
           <div className="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-1.5">
             {loadError}
           </div>
         )}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center justify-between md:justify-end gap-3">
           <button
             onClick={toggleLang}
-            className="text-xs px-2 py-1 rounded-lg border border-stone-700 text-stone-400 hover:text-stone-200"
+            className="hidden md:inline-flex shrink-0 text-xs px-2.5 py-1.5 rounded-lg border border-stone-700 text-stone-400 hover:text-stone-200"
           >
             {lang === "zh" ? "EN" : "中"}
           </button>
-          <span className="text-xs text-stone-500">
-            {session.user.email}
+          <span className="text-xs text-stone-500 min-w-0 truncate">
+            <span className="truncate">{session.user.email}</span>
             <span
               className={
-                "ml-1.5 px-1.5 py-0.5 rounded text-[10px] " +
+                "ml-1.5 px-1.5 py-0.5 rounded text-[10px] whitespace-nowrap " +
                 (isAdmin
                   ? "bg-amber-500/20 text-amber-400"
                   : "bg-stone-800 text-stone-400")
@@ -1393,7 +1401,7 @@ export default function GoldLedger() {
           </span>
           <button
             onClick={handleLogout}
-            className="text-xs px-2 py-1 rounded-lg text-stone-500 hover:text-stone-300"
+            className="shrink-0 text-xs px-2.5 py-1.5 rounded-lg text-stone-500 hover:text-stone-300 hover:bg-stone-900"
           >
             {t("退出", "Sign out")}
           </button>
@@ -1409,7 +1417,7 @@ export default function GoldLedger() {
         </p>
       )}
 
-      <div className="flex gap-2 mb-6">
+      <div className="flex gap-2 mb-6 overflow-x-auto -mx-5 px-5 md:mx-0 md:px-0 md:flex-wrap [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {[
           { key: "workers", label: t("对账", "Reconcile"), icon: Scale },
           { key: "shipments", label: t("出货记录", "Shipments"), icon: Truck },
@@ -1420,7 +1428,7 @@ export default function GoldLedger() {
             key={v.key}
             onClick={() => setView(v.key)}
             className={
-              "flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-colors " +
+              "shrink-0 flex items-center gap-1.5 px-4 py-2.5 md:py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap " +
               (view === v.key
                 ? "bg-amber-500 text-stone-950"
                 : "bg-stone-900 text-stone-300 hover:bg-stone-800 border border-stone-800")
@@ -1497,13 +1505,13 @@ export default function GoldLedger() {
         {exportMsg && <p className="text-xs text-stone-400 mt-2">{exportMsg}</p>}
       </div>
 
-      <div className="flex gap-2 mb-6 border-b border-stone-800 pb-3">
+      <div className="flex gap-2 mb-6 border-b border-stone-800 pb-3 overflow-x-auto -mx-5 px-5 md:mx-0 md:px-0 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {WORKERS.map((w) => (
           <button
             key={w}
             onClick={() => setActiveWorker(w)}
             className={
-              "px-4 py-2 rounded-lg text-sm font-medium transition-colors " +
+              "shrink-0 px-4 py-2.5 md:py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap " +
               (activeWorker === w
                 ? "bg-amber-500 text-stone-950"
                 : "bg-stone-900 text-stone-300 hover:bg-stone-800 border border-stone-800")
@@ -1651,7 +1659,7 @@ export default function GoldLedger() {
                   <button
                     onClick={() => removeRow(tx.id)}
                     aria-label={t("删除这条记录", "Delete this entry")}
-                    className="text-stone-600 hover:text-rose-400"
+                    className="text-stone-600 hover:text-rose-400 p-2 -m-2 rounded-lg active:bg-stone-800"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
@@ -1903,7 +1911,7 @@ export default function GoldLedger() {
           onClick={closeDetail}
         >
           <div
-            className="bg-stone-900 border border-stone-700 rounded-2xl p-5 md:p-6 max-w-lg w-full max-h-[85vh] overflow-y-auto"
+            className="bg-stone-900 border border-stone-700 rounded-2xl p-5 md:p-6 max-w-lg w-full max-h-[88vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
@@ -1912,7 +1920,7 @@ export default function GoldLedger() {
               </h3>
               <button
                 onClick={closeDetail}
-                className="text-stone-500 hover:text-stone-300"
+                className="text-stone-500 hover:text-stone-300 p-2 -m-2 rounded-lg active:bg-stone-800"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -2018,7 +2026,7 @@ export default function GoldLedger() {
                           </span>
                           <button
                             onClick={() => removeDetailRow(t2.id)}
-                            className="text-stone-600 hover:text-rose-400"
+                            className="text-stone-600 hover:text-rose-400 p-2 -m-2 rounded-lg active:bg-stone-800"
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>
@@ -2191,7 +2199,7 @@ export default function GoldLedger() {
                       </span>
                       <button
                         onClick={() => removeShipItem(it.id)}
-                        className="text-stone-600 hover:text-rose-400"
+                        className="text-stone-600 hover:text-rose-400 p-2 -m-2 rounded-lg active:bg-stone-800"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -2382,7 +2390,7 @@ export default function GoldLedger() {
                         </span>
                         <button
                           onClick={() => deleteShipmentRecord(r)}
-                          className="text-stone-600 hover:text-rose-400"
+                          className="text-stone-600 hover:text-rose-400 p-2 -m-2 rounded-lg active:bg-stone-800"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -2567,7 +2575,7 @@ export default function GoldLedger() {
                           <td className="py-2 text-right">
                             <button
                               onClick={() => deleteShipmentRecord(r)}
-                              className="text-stone-600 hover:text-rose-400"
+                              className="text-stone-600 hover:text-rose-400 p-2 -m-2 rounded-lg active:bg-stone-800"
                             >
                               <Trash2 className="w-4 h-4" />
                             </button>
@@ -2895,7 +2903,7 @@ export default function GoldLedger() {
                         </span>
                         <button
                           onClick={() => deleteTransferRecord(r)}
-                          className="text-stone-600 hover:text-rose-400"
+                          className="text-stone-600 hover:text-rose-400 p-2 -m-2 rounded-lg active:bg-stone-800"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -3076,7 +3084,7 @@ export default function GoldLedger() {
                           <td className="py-2 text-right">
                             <button
                               onClick={() => deleteTransferRecord(r)}
-                              className="text-stone-600 hover:text-rose-400"
+                              className="text-stone-600 hover:text-rose-400 p-2 -m-2 rounded-lg active:bg-stone-800"
                             >
                               <Trash2 className="w-4 h-4" />
                             </button>
@@ -3149,7 +3157,7 @@ export default function GoldLedger() {
                           <button
                             onClick={() => deleteUser(u.id)}
                             disabled={deletingUserId === u.id}
-                            className="text-stone-600 hover:text-rose-400 disabled:opacity-50"
+                            className="text-stone-600 hover:text-rose-400 disabled:opacity-50 p-2 -m-2 rounded-lg active:bg-stone-800"
                           >
                             {deletingUserId === u.id ? (
                               <Loader2 className="w-4 h-4 animate-spin" />
