@@ -231,6 +231,22 @@ export default function GoldLedger() {
   const [confirmError, setConfirmError] = useState("");
   const [confirmSaving, setConfirmSaving] = useState(false);
 
+  // 转手核对：一次性登记（送出+接收一起填）
+  const [showQuickTransfer, setShowQuickTransfer] = useState(false);
+  const [quickType, setQuickType] = useState(TRANSFER_TYPE_PRESETS[0]);
+  const [quickTypeCustom, setQuickTypeCustom] = useState("");
+  const [quickFrom, setQuickFrom] = useState(WORKERS[0]);
+  const [quickTo, setQuickTo] = useState(WORKERS[1]);
+  const [quickSentDate, setQuickSentDate] = useState(todayStr());
+  const [quickSentWeight, setQuickSentWeight] = useState("");
+  const [quickSentDesc, setQuickSentDesc] = useState("");
+  const [quickReceivedDate, setQuickReceivedDate] = useState(todayStr());
+  const [quickReceivedWeight, setQuickReceivedWeight] = useState("");
+  const [quickReceivedDesc, setQuickReceivedDesc] = useState("");
+  const [quickError, setQuickError] = useState("");
+  const [quickSaving, setQuickSaving] = useState(false);
+  const [quickMsg, setQuickMsg] = useState("");
+
   // 账号管理（仅admin）
   const [adminUsers, setAdminUsers] = useState([]);
   const [adminUsersLoading, setAdminUsersLoading] = useState(false);
@@ -350,6 +366,16 @@ export default function GoldLedger() {
     const type = transType === "OTHER" ? transTypeCustom.trim() || "转手" : transType;
     setTransSentDesc(suggestLabel(type, transFrom, "send"));
   }, [transType, transTypeCustom, transFrom]);
+
+  useEffect(() => {
+    const type = quickType === "OTHER" ? quickTypeCustom.trim() || "转手" : quickType;
+    setQuickSentDesc(suggestLabel(type, quickFrom, "send"));
+  }, [quickType, quickTypeCustom, quickFrom]);
+
+  useEffect(() => {
+    const type = quickType === "OTHER" ? quickTypeCustom.trim() || "转手" : quickType;
+    setQuickReceivedDesc(suggestLabel(type, quickTo, "receive"));
+  }, [quickType, quickTypeCustom, quickTo]);
 
   useEffect(() => {
     setGoldbarConfirmed(false);
@@ -800,6 +826,85 @@ export default function GoldLedger() {
       setTransMsg("保存失败，检查网络后重试");
     } finally {
       setTransSaving(false);
+    }
+  }
+
+  // 一次性登记：送出+接收一起填，保存后两边流水一次写进去，直接是已确认状态
+  async function saveQuickTransfer() {
+    setQuickError("");
+    setQuickMsg("");
+    const type = quickType === "OTHER" ? quickTypeCustom.trim() : quickType;
+    const sentW = parseFloat(quickSentWeight);
+    const receivedW = parseFloat(quickReceivedWeight);
+    if (!type) {
+      setQuickError("请填写类型");
+      return;
+    }
+    if (quickFrom === quickTo) {
+      setQuickError("送出方和接收方不能是同一个");
+      return;
+    }
+    if (quickSentWeight === "" || Number.isNaN(sentW) || sentW <= 0) {
+      setQuickError("请填写有效的送出方重量");
+      return;
+    }
+    if (quickReceivedWeight === "" || Number.isNaN(receivedW) || receivedW <= 0) {
+      setQuickError("请填写有效的接收方重量");
+      return;
+    }
+    if (!quickSentDesc.trim()) {
+      setQuickError("请填写送出方的流水描述");
+      return;
+    }
+    if (!quickReceivedDesc.trim()) {
+      setQuickError("请填写接收方的流水描述");
+      return;
+    }
+    setQuickSaving(true);
+    const sentItemId = String(Date.now() + Math.random());
+    const receivedItemId = String(Date.now() + Math.random() + 1);
+    const record = {
+      id: String(Date.now() + Math.random()),
+      type,
+      fromWorker: quickFrom,
+      toWorker: quickTo,
+      sentDate: quickSentDate,
+      sentWeight: sentW,
+      sentDesc: quickSentDesc.trim(),
+      sentItemId,
+      receivedDate: quickReceivedDate,
+      receivedWeight: receivedW,
+      receivedDesc: quickReceivedDesc.trim(),
+      receivedItemId,
+      status: "confirmed",
+      diff: receivedW - sentW,
+    };
+    addDraftItemLocal(quickFrom, quickSentDate, {
+      id: sentItemId,
+      desc: quickSentDesc.trim(),
+      amount: -sentW,
+      dest: quickTo,
+    });
+    addDraftItemLocal(quickTo, quickReceivedDate, {
+      id: receivedItemId,
+      desc: quickReceivedDesc.trim(),
+      amount: receivedW,
+      dest: quickFrom,
+    });
+    try {
+      const { error } = await supabase.rpc("append_special_record", {
+        p_key: SPECIAL_KEYS.TRANSFERS,
+        p_record: record,
+      });
+      if (error) throw error;
+      await refreshSpecialData(SPECIAL_KEYS.TRANSFERS, setTransferData, emptyTransferData);
+      setQuickSentWeight("");
+      setQuickReceivedWeight("");
+      setQuickMsg(`已保存，${quickFrom} 和 ${quickTo} 的流水都已经写进去了。`);
+    } catch {
+      setQuickMsg("保存失败，检查网络后重试");
+    } finally {
+      setQuickSaving(false);
     }
   }
 
@@ -2412,6 +2517,176 @@ export default function GoldLedger() {
 
       {view === "transfers" && (
         <>
+          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
+            <button
+              onClick={() => setShowQuickTransfer((v) => !v)}
+              className="text-xs px-3 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
+            >
+              {showQuickTransfer ? "收起一次性登记" : "一次性登记（送出+接收一起填）"}
+            </button>
+            {showQuickTransfer && (
+              <div className="mt-4">
+                <p className="text-xs text-stone-500 mb-3">
+                  适合送出方已经把重量都告诉接收方、想一次填完两边的情况。保存后直接是"已确认"状态，两边的流水会同时写进去。
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                  <div>
+                    <label className="block text-xs text-stone-500 mb-1">类型</label>
+                    <select
+                      value={quickType}
+                      onChange={(e) => setQuickType(e.target.value)}
+                      className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                    >
+                      {TRANSFER_TYPE_PRESETS.map((t) => (
+                        <option key={t} value={t}>
+                          {t}
+                        </option>
+                      ))}
+                      <option value="OTHER">自定义…</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-stone-500 mb-1">送出方</label>
+                    <select
+                      value={quickFrom}
+                      onChange={(e) => setQuickFrom(e.target.value)}
+                      className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                    >
+                      {WORKERS.map((w) => (
+                        <option key={w} value={w}>
+                          {w}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-stone-500 mb-1">接收方</label>
+                    <select
+                      value={quickTo}
+                      onChange={(e) => setQuickTo(e.target.value)}
+                      className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                    >
+                      {WORKERS.map((w) => (
+                        <option key={w} value={w}>
+                          {w}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                {quickType === "OTHER" && (
+                  <input
+                    type="text"
+                    placeholder="自定义类型名称"
+                    value={quickTypeCustom}
+                    onChange={(e) => setQuickTypeCustom(e.target.value)}
+                    className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500 mb-3"
+                  />
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3 pb-3 border-b border-stone-800">
+                  <div>
+                    <label className="block text-xs text-stone-500 mb-1">送出日期</label>
+                    <input
+                      type="date"
+                      value={quickSentDate}
+                      onChange={(e) => setQuickSentDate(e.target.value)}
+                      className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-stone-500 mb-1">送出方重量(g)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={quickSentWeight}
+                      onChange={(e) => setQuickSentWeight(e.target.value)}
+                      className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm font-mono text-stone-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-stone-500 mb-1">
+                      {quickFrom} 流水描述
+                    </label>
+                    <input
+                      type="text"
+                      value={quickSentDesc}
+                      onChange={(e) => setQuickSentDesc(e.target.value)}
+                      className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                  <div>
+                    <label className="block text-xs text-stone-500 mb-1">接收日期</label>
+                    <input
+                      type="date"
+                      value={quickReceivedDate}
+                      onChange={(e) => setQuickReceivedDate(e.target.value)}
+                      className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-stone-500 mb-1">接收方重量(g)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={quickReceivedWeight}
+                      onChange={(e) => setQuickReceivedWeight(e.target.value)}
+                      className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm font-mono text-stone-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-stone-500 mb-1">
+                      {quickTo} 流水描述
+                    </label>
+                    <input
+                      type="text"
+                      value={quickReceivedDesc}
+                      onChange={(e) => setQuickReceivedDesc(e.target.value)}
+                      className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                </div>
+
+                {quickSentWeight !== "" &&
+                  quickReceivedWeight !== "" &&
+                  !Number.isNaN(parseFloat(quickSentWeight)) &&
+                  !Number.isNaN(parseFloat(quickReceivedWeight)) && (
+                    <p className="text-xs text-stone-500 mb-2">
+                      差异预览：
+                      <span
+                        className={
+                          Math.abs(parseFloat(quickReceivedWeight) - parseFloat(quickSentWeight)) >
+                          (transferData.threshold ?? 0.05)
+                            ? "text-rose-400"
+                            : "text-emerald-400"
+                        }
+                      >
+                        {" "}
+                        {fmt(parseFloat(quickReceivedWeight) - parseFloat(quickSentWeight))} g
+                      </span>
+                    </p>
+                  )}
+                {quickError && <p className="text-xs text-rose-400 mb-2">{quickError}</p>}
+                <button
+                  onClick={saveQuickTransfer}
+                  disabled={quickSaving}
+                  className="flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-stone-950 font-medium rounded-lg px-5 py-2.5 text-sm"
+                >
+                  {quickSaving ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Save className="w-4 h-4" />
+                  )}
+                  一次性保存（送出+接收）
+                </button>
+                {quickMsg && <p className="text-xs text-stone-400 mt-2">{quickMsg}</p>}
+              </div>
+            )}
+          </div>
+
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
             <h2 className="text-sm font-medium text-stone-300 mb-3">
               第一步：送出方先保存重量
