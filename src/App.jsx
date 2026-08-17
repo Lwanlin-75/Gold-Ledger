@@ -199,6 +199,7 @@ export default function GoldLedger() {
   const [shipConfirmingId, setShipConfirmingId] = useState(null);
   const [shipConfirmDate, setShipConfirmDate] = useState(todayStr());
   const [shipConfirmWeight, setShipConfirmWeight] = useState("");
+  const [shipConfirmSerial, setShipConfirmSerial] = useState("");
   const [shipConfirmError, setShipConfirmError] = useState("");
   const [shipConfirmSaving, setShipConfirmSaving] = useState(false);
 
@@ -518,12 +519,10 @@ export default function GoldLedger() {
     }
     setShipSaving(true);
     const sentTotal = items.reduce((s, i) => s + i.weight, 0);
-    const serialNum = shipmentData.nextSerial || 2608081;
-    const serial = "HQ" + serialNum;
     const sentItemId = String(Date.now() + Math.random());
     const record = {
       id: String(Date.now() + Math.random()),
-      serial,
+      serial: "",
       fromWorker: shipFrom,
       toWorker: SHIP_TO,
       date: shipDate,
@@ -539,7 +538,7 @@ export default function GoldLedger() {
     };
     addDraftItemLocal(shipFrom, shipDate, {
       id: sentItemId,
-      desc: `${shipFlowDesc.trim()} (${serial})`,
+      desc: shipFlowDesc.trim(),
       amount: -sentTotal,
       dest: SHIP_TO,
     });
@@ -547,8 +546,6 @@ export default function GoldLedger() {
       const { error } = await supabase.rpc("append_special_record", {
         p_key: SPECIAL_KEYS.SHIPMENTS,
         p_record: record,
-        p_counter_field: "nextSerial",
-        p_counter_increment: 1,
       });
       if (error) throw error;
       await refreshSpecialData(SPECIAL_KEYS.SHIPMENTS, setShipmentData, emptyShipmentData);
@@ -561,7 +558,7 @@ export default function GoldLedger() {
       setGoldbeanConfirmed(false);
       setShipDate(todayStr());
       setShipFlowDesc("出货");
-      setShipMsg(`已保存，单号 ${serial}，已写入 ${shipFrom} 流水，等待${SHIP_TO}确认。`);
+      setShipMsg(`已保存，已写入 ${shipFrom} 流水，等待${SHIP_TO}确认接收并填写单号。`);
     } catch {
       setShipMsg("保存失败，检查网络后重试");
     } finally {
@@ -573,6 +570,7 @@ export default function GoldLedger() {
     setShipConfirmingId(record.id);
     setShipConfirmDate(todayStr());
     setShipConfirmWeight("");
+    setShipConfirmSerial("");
     setShipConfirmError("");
   }
 
@@ -585,6 +583,10 @@ export default function GoldLedger() {
       setShipConfirmError(`请填写有效的${SHIP_TO}重量`);
       return;
     }
+    if (!shipConfirmSerial.trim()) {
+      setShipConfirmError("请填写单号");
+      return;
+    }
     setShipConfirmSaving(true);
     try {
       const { error } = await supabase.rpc("update_special_record", {
@@ -594,6 +596,7 @@ export default function GoldLedger() {
           status: "confirmed",
           confirmDate: shipConfirmDate,
           confirmWeight: w,
+          serial: shipConfirmSerial.trim(),
           diff: w - record.sentTotal,
         },
       });
@@ -2087,7 +2090,7 @@ export default function GoldLedger() {
                   >
                     <div className="flex items-center justify-between flex-wrap gap-2">
                       <div className="text-sm text-stone-300">
-                        <span className="text-amber-400">{r.serial}</span>
+                        <span className="text-stone-600 italic">单号待{SHIP_TO}填写</span>
                         {"  "}
                         {r.fromWorker} → {r.toWorker}
                         <span className="text-stone-500 ml-2">{r.date}</span>
@@ -2108,7 +2111,7 @@ export default function GoldLedger() {
 
                     {shipConfirmingId === r.id ? (
                       <div className="mt-3 pt-3 border-t border-stone-800">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
                           <div>
                             <label className="block text-xs text-stone-500 mb-1">
                               确认日期
@@ -2130,6 +2133,18 @@ export default function GoldLedger() {
                               value={shipConfirmWeight}
                               onChange={(e) => setShipConfirmWeight(e.target.value)}
                               className="w-full bg-stone-900 border border-stone-700 rounded-lg px-3 py-2 text-sm font-mono text-stone-100 focus:outline-none focus:border-amber-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs text-stone-500 mb-1">
+                              单号
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="例如 HQ2608081"
+                              value={shipConfirmSerial}
+                              onChange={(e) => setShipConfirmSerial(e.target.value)}
+                              className="w-full bg-stone-900 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500"
                             />
                           </div>
                         </div>
