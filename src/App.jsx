@@ -114,6 +114,11 @@ function destinationsFor(worker) {
 
 const emptyWorkerData = () => ({ lastWeight: null, history: [], drafts: {} });
 
+// 中英文对照：t(中文, 英文) —— lang由组件内部state决定，这里只是工厂函数
+function makeT(lang) {
+  return (zh, en) => (lang === "en" ? en : zh);
+}
+
 // 按顺序重新计算整条历史链：非归档记录用流水重新算 total/要有/损耗，
 // 归档记录（exported）明细已清空，冻结原本算好的数字不动，只跟着更新 prevWeight。
 function recomputeChain(history) {
@@ -135,6 +140,24 @@ function recomputeChain(history) {
 }
 
 export default function GoldLedger() {
+  const [lang, setLang] = useState(() => {
+    try {
+      return localStorage.getItem("gl_lang") || "zh";
+    } catch {
+      return "zh";
+    }
+  });
+  const t = makeT(lang);
+  function toggleLang() {
+    setLang((l) => {
+      const next = l === "zh" ? "en" : "zh";
+      try {
+        localStorage.setItem("gl_lang", next);
+      } catch {}
+      return next;
+    });
+  }
+
   const [session, setSession] = useState(null);
   const [role, setRole] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
@@ -605,9 +628,11 @@ export default function GoldLedger() {
       confirmWeight: null,
       diff: null,
     };
+    const categoryList = [...new Set(items.map((i) => i.category))].join("、");
+    const autoDesc = `${shipFlowDesc.trim()} ${categoryList}`.trim();
     addDraftItemLocal(shipFrom, shipDate, {
       id: sentItemId,
-      desc: shipFlowDesc.trim(),
+      desc: autoDesc,
       amount: -sentTotal,
       dest: SHIP_TO,
     });
@@ -1253,17 +1278,27 @@ export default function GoldLedger() {
   if (!session) {
     return (
       <div className="w-full max-w-sm mx-auto bg-stone-950 text-stone-100 rounded-2xl border border-stone-800 p-6">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
-            <Scale className="w-5 h-5 text-amber-400" />
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
+              <Scale className="w-5 h-5 text-amber-400" />
+            </div>
+            <div>
+              <h1 className="text-lg font-semibold text-stone-100 tracking-wide">
+                {t("金重对账", "Gold Ledger")}
+              </h1>
+              <p className="text-xs text-stone-500">{t("请登录", "Please sign in")}</p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-lg font-semibold text-stone-100 tracking-wide">金重对账</h1>
-            <p className="text-xs text-stone-500">请登录</p>
-          </div>
+          <button
+            onClick={toggleLang}
+            className="text-xs px-2 py-1 rounded-lg border border-stone-700 text-stone-400 hover:text-stone-200 shrink-0"
+          >
+            {lang === "zh" ? "EN" : "中"}
+          </button>
         </div>
         <form onSubmit={handleLogin}>
-          <label className="block text-xs text-stone-500 mb-1">账号</label>
+          <label className="block text-xs text-stone-500 mb-1">{t("账号", "Account")}</label>
           <input
             type="text"
             value={loginEmail}
@@ -1271,7 +1306,7 @@ export default function GoldLedger() {
             className="w-full bg-stone-900 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500 mb-3"
             autoCapitalize="off"
           />
-          <label className="block text-xs text-stone-500 mb-1">密码</label>
+          <label className="block text-xs text-stone-500 mb-1">{t("密码", "Password")}</label>
           <input
             type="password"
             value={loginPassword}
@@ -1285,7 +1320,7 @@ export default function GoldLedger() {
             className="w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-stone-950 font-medium rounded-lg px-5 py-2.5 text-sm"
           >
             {loginBusy && <Loader2 className="w-4 h-4 animate-spin" />}
-            登录
+            {t("登录", "Sign in")}
           </button>
         </form>
       </div>
@@ -1296,7 +1331,7 @@ export default function GoldLedger() {
     return (
       <div className="min-h-[300px] flex items-center justify-center text-stone-400 bg-stone-950 rounded-2xl">
         <Loader2 className="w-5 h-5 animate-spin mr-2" />
-        正在加载记录…
+        {t("正在加载记录…", "Loading records…")}
       </div>
     );
   }
@@ -1324,9 +1359,11 @@ export default function GoldLedger() {
           </div>
           <div>
             <h1 className="text-lg font-semibold text-stone-100 tracking-wide">
-              金重对账
+              {t("金重对账", "Gold Ledger")}
             </h1>
-            <p className="text-xs text-stone-500">每天过秤，自动算损耗</p>
+            <p className="text-xs text-stone-500">
+              {t("每天过秤，自动算损耗", "Weigh daily, loss calculated automatically")}
+            </p>
           </div>
         </div>
         {loadError && (
@@ -1335,6 +1372,12 @@ export default function GoldLedger() {
           </div>
         )}
         <div className="flex items-center gap-3">
+          <button
+            onClick={toggleLang}
+            className="text-xs px-2 py-1 rounded-lg border border-stone-700 text-stone-400 hover:text-stone-200"
+          >
+            {lang === "zh" ? "EN" : "中"}
+          </button>
           <span className="text-xs text-stone-500">
             {session.user.email}
             <span
@@ -1352,23 +1395,26 @@ export default function GoldLedger() {
             onClick={handleLogout}
             className="text-xs px-2 py-1 rounded-lg text-stone-500 hover:text-stone-300"
           >
-            退出
+            {t("退出", "Sign out")}
           </button>
         </div>
       </div>
 
       {!isAdmin && (
         <p className="text-xs text-stone-600 mb-4">
-          你是普通账号，只能看到最近3天的记录；导出、撤销、编辑历史等功能只有管理员能用。
+          {t(
+            "你是普通账号，只能看到最近3天的记录；导出、撤销、编辑历史等功能只有管理员能用。",
+            "You have a standard account: only the last 3 days are visible. Export, undo, and edit-history are admin-only."
+          )}
         </p>
       )}
 
       <div className="flex gap-2 mb-6">
         {[
-          { key: "workers", label: "对账", icon: Scale },
-          { key: "shipments", label: "出货记录", icon: Truck },
-          { key: "transfers", label: "转手核对", icon: ArrowLeftRight },
-          ...(isAdmin ? [{ key: "admin", label: "账号管理", icon: Users }] : []),
+          { key: "workers", label: t("对账", "Reconcile"), icon: Scale },
+          { key: "shipments", label: t("出货记录", "Shipments"), icon: Truck },
+          { key: "transfers", label: t("转手核对", "Transfers"), icon: ArrowLeftRight },
+          ...(isAdmin ? [{ key: "admin", label: t("账号管理", "Accounts"), icon: Users }] : []),
         ].map((v) => (
           <button
             key={v.key}
@@ -1395,10 +1441,13 @@ export default function GoldLedger() {
       <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
         <h2 className="text-sm font-medium text-stone-300 mb-1 flex items-center gap-2">
           <Archive className="w-4 h-4" />
-          导出与归档（全部worker）
+          {t("导出与归档（全部worker）", "Export & Archive (all workers)")}
         </h2>
         <p className="text-xs text-stone-500 mb-3">
-          还有 {pendingCount.days} 天、{pendingCount.lines} 条流水未导出。建议每7天导出一次备份。
+          {t(
+            `还有 ${pendingCount.days} 天、${pendingCount.lines} 条流水未导出。建议每7天导出一次备份。`,
+            `${pendingCount.days} day(s), ${pendingCount.lines} line(s) not yet exported. We recommend exporting every 7 days.`
+          )}
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <button
@@ -1411,27 +1460,27 @@ export default function GoldLedger() {
             ) : (
               <Download className="w-4 h-4" />
             )}
-            导出Excel
+            {t("导出Excel", "Export Excel")}
           </button>
           {pendingExportKeys && (
             <>
               {confirmClear ? (
                 <>
                   <span className="text-xs text-rose-400">
-                    确定清空这批明细？（汇总数字会保留）
+                    {t("确定清空这批明细？（汇总数字会保留）", "Clear this batch of line items? (Summary numbers stay)")}
                   </span>
                   <button
                     onClick={handleClearExported}
                     disabled={clearing}
                     className="text-xs px-3 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/40 text-rose-400 disabled:opacity-60"
                   >
-                    {clearing ? "清空中…" : "确认清空"}
+                    {clearing ? t("清空中…", "Clearing…") : t("确认清空", "Confirm clear")}
                   </button>
                   <button
                     onClick={() => setConfirmClear(false)}
                     className="text-xs px-3 py-1.5 rounded-lg text-stone-500 hover:text-stone-300"
                   >
-                    取消
+                    {t("取消", "Cancel")}
                   </button>
                 </>
               ) : (
@@ -1439,7 +1488,7 @@ export default function GoldLedger() {
                   onClick={() => setConfirmClear(true)}
                   className="text-xs px-3 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-400 hover:text-stone-200"
                 >
-                  清空已导出明细
+                  {t("清空已导出明细", "Clear exported line items")}
                 </button>
               )}
             </>
@@ -1467,7 +1516,7 @@ export default function GoldLedger() {
 
       <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 mb-6">
         <label className="block text-xs text-amber-400/80 mb-1 font-medium">
-          正在录入哪一天的数据？
+          {t("正在录入哪一天的数据？", "Which day are you entering?")}
         </label>
         <input
           type="date"
@@ -1476,19 +1525,22 @@ export default function GoldLedger() {
           className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
         />
         <p className="text-xs text-stone-500 mt-2">
-          下面的流水和实重都会记在这个日期上。补录以前的数据时，请从最早的一天开始，按顺序一天天存完再存下一天。
+          {t(
+            "下面的流水和实重都会记在这个日期上。补录以前的数据时，请从最早的一天开始，按顺序一天天存完再存下一天。",
+            "Flow entries and weight below will be recorded under this date. When backfilling, start from the earliest day and save one day at a time in order."
+          )}
         </p>
       </div>
 
       <div className="grid md:grid-cols-3 gap-4 mb-6">
         <div className="bg-stone-900 border border-stone-800 rounded-xl p-4">
-          <p className="text-xs text-stone-500 mb-1">上次实重</p>
+          <p className="text-xs text-stone-500 mb-1">{t("上次实重", "Last actual weight")}</p>
           <p className="text-xl font-mono tabular-nums text-stone-100">
-            {hasBaseline ? fmtPlain(cur.lastWeight) + " g" : "尚未设置"}
+            {hasBaseline ? fmtPlain(cur.lastWeight) + " g" : t("尚未设置", "Not set")}
           </p>
         </div>
         <div className="bg-stone-900 border border-stone-800 rounded-xl p-4">
-          <p className="text-xs text-stone-500 mb-1">今日变动合计</p>
+          <p className="text-xs text-stone-500 mb-1">{t("今日变动合计", "Today's net change")}</p>
           <p
             className={
               "text-xl font-mono tabular-nums " +
@@ -1503,7 +1555,7 @@ export default function GoldLedger() {
           </p>
         </div>
         <div className="bg-stone-900 border border-stone-800 rounded-xl p-4">
-          <p className="text-xs text-stone-500 mb-1">历史累计损耗</p>
+          <p className="text-xs text-stone-500 mb-1">{t("历史累计损耗", "Cumulative loss")}</p>
           <p
             className={
               "text-xl font-mono tabular-nums " +
@@ -1519,19 +1571,22 @@ export default function GoldLedger() {
 
       {!hasBaseline && (
         <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 mb-6 text-sm text-amber-300">
-          还没有 {activeWorker} 的期初实重，先在下面填入这一天过秤的重量作为起点，之后就能自动算损耗了。
+          {t(
+            `还没有 ${activeWorker} 的期初实重，先在下面填入这一天过秤的重量作为起点，之后就能自动算损耗了。`,
+            `No starting weight for ${activeWorker} yet. Enter today's scale reading below as the baseline, then loss will be calculated automatically from then on.`
+          )}
         </div>
       )}
 
       <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
         <h2 className="text-sm font-medium text-stone-300 mb-3">
-          {dateInput} 流水（{activeWorker}）
+          {dateInput} {t("流水", "flow")}（{activeWorker}）
         </h2>
 
         <div className="grid grid-cols-1 md:grid-cols-[1fr_120px_130px_auto] gap-2 mb-2">
           <input
             type="text"
-            placeholder="描述，例如：出 老板-999料"
+            placeholder={t("描述，例如：出 老板-999料", "Description, e.g. Out - Boss 999")}
             value={descInput}
             onChange={(e) => setDescInput(e.target.value)}
             className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500"
@@ -1539,7 +1594,7 @@ export default function GoldLedger() {
           <input
             type="number"
             step="0.01"
-            placeholder="+/- 克"
+            placeholder={t("+/- 克", "+/- grams")}
             value={amountInput}
             onChange={(e) => setAmountInput(e.target.value)}
             className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500 font-mono"
@@ -1551,7 +1606,7 @@ export default function GoldLedger() {
           >
             {destinations.map((d) => (
               <option key={d} value={d}>
-                {d === "" ? "去向（可选）" : d}
+                {d === "" ? t("去向（可选）", "Destination (optional)") : d}
               </option>
             ))}
           </select>
@@ -1560,27 +1615,27 @@ export default function GoldLedger() {
             className="flex items-center justify-center gap-1 bg-stone-800 hover:bg-stone-700 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100"
           >
             <Plus className="w-4 h-4" />
-            添加
+            {t("添加", "Add")}
           </button>
         </div>
         {rowError && <p className="text-xs text-rose-400 mb-2">{rowError}</p>}
 
         {curDraft.length === 0 ? (
           <p className="text-sm text-stone-600 py-4 text-center">
-            这一天还没有记录任何加减
+            {t("这一天还没有记录任何加减", "No entries for this day yet")}
           </p>
         ) : (
           <div className="divide-y divide-stone-800 border-t border-stone-800 mt-2">
-            {curDraft.map((t) => (
+            {curDraft.map((tx) => (
               <div
-                key={t.id}
+                key={tx.id}
                 className="flex items-center justify-between py-2 text-sm"
               >
                 <div className="flex items-center gap-2 min-w-0">
-                  <span className="text-stone-300 truncate">{t.desc}</span>
-                  {t.dest && (
+                  <span className="text-stone-300 truncate">{tx.desc}</span>
+                  {tx.dest && (
                     <span className="text-xs text-stone-500 bg-stone-800 rounded px-2 py-0.5 shrink-0">
-                      {t.dest}
+                      {tx.dest}
                     </span>
                   )}
                 </div>
@@ -1588,14 +1643,14 @@ export default function GoldLedger() {
                   <span
                     className={
                       "font-mono tabular-nums " +
-                      (t.amount > 0 ? "text-emerald-400" : "text-rose-400")
+                      (tx.amount > 0 ? "text-emerald-400" : "text-rose-400")
                     }
                   >
-                    {fmt(t.amount)} g
+                    {fmt(tx.amount)} g
                   </span>
                   <button
-                    onClick={() => removeRow(t.id)}
-                    aria-label="删除这条记录"
+                    onClick={() => removeRow(tx.id)}
+                    aria-label={t("删除这条记录", "Delete this entry")}
                     className="text-stone-600 hover:text-rose-400"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -1608,24 +1663,24 @@ export default function GoldLedger() {
       </div>
 
       <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
-        <h2 className="text-sm font-medium text-stone-300 mb-3">过秤结算</h2>
+        <h2 className="text-sm font-medium text-stone-300 mb-3">{t("过秤结算", "Scale settlement")}</h2>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
           <div>
             <label className="block text-xs text-stone-500 mb-1">
-              过秤读数（{dateInput}，连盒子，克）
+              {t(`过秤读数（${dateInput}，连盒子，克）`, `Scale reading (${dateInput}, with box, g)`)}
             </label>
             <input
               type="number"
               step="0.01"
-              placeholder="从秤上读到的数字"
+              placeholder={t("从秤上读到的数字", "Number from the scale")}
               value={actualInput}
               onChange={(e) => setActualInput(e.target.value)}
               className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-lg font-mono tabular-nums text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500"
             />
           </div>
           <div>
-            <label className="block text-xs text-stone-500 mb-1">盒子重量（克）</label>
+            <label className="block text-xs text-stone-500 mb-1">{t("盒子重量（克）", "Box weight (g)")}</label>
             {isAdmin ? (
               <div className="flex gap-1.5">
                 <input
@@ -1639,18 +1694,18 @@ export default function GoldLedger() {
                   onClick={saveBoxWeight}
                   className="shrink-0 text-xs px-3 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
                 >
-                  更新
+                  {t("更新", "Update")}
                 </button>
               </div>
             ) : (
               <div className="w-full bg-stone-950 border border-stone-800 rounded-lg px-3 py-2 text-sm font-mono tabular-nums text-stone-500">
-                {fmtPlain(parseFloat(boxWeightDraft) || 0)}（只有admin能改）
+                {fmtPlain(parseFloat(boxWeightDraft) || 0)}
               </div>
             )}
           </div>
           <div>
             <label className="block text-xs text-stone-500 mb-1">
-              找回重量（没有就是0，克）
+              {t("找回重量（没有就是0，克）", "Recovered weight (0 if none, g)")}
             </label>
             <input
               type="number"
@@ -1663,7 +1718,7 @@ export default function GoldLedger() {
         </div>
         {actualNum !== null && !Number.isNaN(actualNum) && (
           <p className="text-xs text-stone-500 mb-2">
-            算入损耗的实重 = 过秤读数 − 盒重 + 找回 ={" "}
+            {t("算入损耗的实重 = 过秤读数 − 盒重 + 找回 =", "Actual weight used = scale reading − box + recovered =")}{" "}
             <span className="text-stone-300 font-mono">{fmtPlain(actualNum)} g</span>
           </p>
         )}
@@ -1674,7 +1729,7 @@ export default function GoldLedger() {
         {hasBaseline && (
           <div className="grid grid-cols-2 gap-4 mt-4">
             <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
-              <p className="text-xs text-stone-500 mb-1">要有</p>
+              <p className="text-xs text-stone-500 mb-1">{t("要有", "Expected")}</p>
               <p className="font-mono tabular-nums text-stone-200">
                 {fmtPlain(expected)} g
               </p>
@@ -1690,7 +1745,7 @@ export default function GoldLedger() {
               }
             >
               <p className="text-xs text-stone-500 mb-1 flex items-center gap-1">
-                损耗
+                {t("损耗", "Loss")}
                 {loss !== null &&
                   (lossOver ? (
                     <AlertTriangle className="w-3 h-3 text-rose-400" />
@@ -1708,7 +1763,7 @@ export default function GoldLedger() {
                     : "text-emerald-400")
                 }
               >
-                {loss === null ? "填入实重后显示" : fmt(loss) + " g"}
+                {loss === null ? t("填入实重后显示", "Shown after weight entered") : fmt(loss) + " g"}
               </p>
             </div>
           </div>
@@ -1724,7 +1779,7 @@ export default function GoldLedger() {
           ) : (
             <Save className="w-4 h-4" />
           )}
-          保存这一天
+          {t("保存这一天", "Save this day")}
         </button>
         {saveMsg && (
           <p className="text-xs text-stone-400 mt-2">{saveMsg}</p>
@@ -1735,12 +1790,12 @@ export default function GoldLedger() {
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-medium text-stone-300 flex items-center gap-2">
             <History className="w-4 h-4" />
-            历史记录（最近 {recentHistory.length} 天，点日期看详情）
+            {t(`历史记录（最近 ${recentHistory.length} 天，点日期看详情）`, `History (last ${recentHistory.length} days, click a date for details)`)}
           </h2>
           {cur.history.length > 0 && (
             <div className="flex items-center gap-2">
               {confirmUndo && (
-                <span className="text-xs text-rose-400">确定撤销最近一天？</span>
+                <span className="text-xs text-rose-400">{t("确定撤销最近一天？", "Undo the most recent day?")}</span>
               )}
               <button
                 onClick={() =>
@@ -1755,17 +1810,17 @@ export default function GoldLedger() {
                 }
               >
                 {undoing
-                  ? "撤销中…"
+                  ? t("撤销中…", "Undoing…")
                   : confirmUndo
-                  ? "确认撤销"
-                  : "撤销最近一天"}
+                  ? t("确认撤销", "Confirm undo")
+                  : t("撤销最近一天", "Undo last day")}
               </button>
               {confirmUndo && (
                 <button
                   onClick={() => setConfirmUndo(false)}
                   className="text-xs px-3 py-1.5 rounded-lg text-stone-500 hover:text-stone-300"
                 >
-                  取消
+                  {t("取消", "Cancel")}
                 </button>
               )}
             </div>
@@ -1773,18 +1828,18 @@ export default function GoldLedger() {
         </div>
         {recentHistory.length === 0 ? (
           <p className="text-sm text-stone-600 py-4 text-center">
-            还没有历史记录
+            {t("还没有历史记录", "No history yet")}
           </p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-xs text-stone-500 border-b border-stone-800">
-                  <th className="text-left py-2 font-normal">日期</th>
-                  <th className="text-right py-2 font-normal">要有</th>
-                  <th className="text-right py-2 font-normal">实重</th>
-                  <th className="text-right py-2 font-normal">损耗</th>
-                  <th className="text-right py-2 font-normal">趋势</th>
+                  <th className="text-left py-2 font-normal">{t("日期", "Date")}</th>
+                  <th className="text-right py-2 font-normal">{t("要有", "Expected")}</th>
+                  <th className="text-right py-2 font-normal">{t("实重", "Actual")}</th>
+                  <th className="text-right py-2 font-normal">{t("损耗", "Loss")}</th>
+                  <th className="text-right py-2 font-normal">{t("趋势", "Trend")}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-800">
@@ -1867,23 +1922,26 @@ export default function GoldLedger() {
               <div>
                 <div className="flex items-center gap-2 text-xs text-stone-500 bg-stone-800 rounded-lg px-3 py-2 mb-4">
                   <Lock className="w-3.5 h-3.5" />
-                  这天的流水明细已经导出并清空，只能查看汇总，无法再编辑。
+                  {t(
+                    "这天的流水明细已经导出并清空，只能查看汇总，无法再编辑。",
+                    "This day's line items have been exported and cleared. View-only; can't be edited."
+                  )}
                 </div>
                 <div className="grid grid-cols-3 gap-3">
                   <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
-                    <p className="text-xs text-stone-500 mb-1">要有</p>
+                    <p className="text-xs text-stone-500 mb-1">{t("要有", "Expected")}</p>
                     <p className="font-mono tabular-nums text-stone-200">
                       {fmtPlain(detailRecord.expected)} g
                     </p>
                   </div>
                   <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
-                    <p className="text-xs text-stone-500 mb-1">实重</p>
+                    <p className="text-xs text-stone-500 mb-1">{t("实重", "Actual")}</p>
                     <p className="font-mono tabular-nums text-stone-200">
                       {fmtPlain(detailRecord.actual)} g
                     </p>
                   </div>
                   <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
-                    <p className="text-xs text-stone-500 mb-1">损耗</p>
+                    <p className="text-xs text-stone-500 mb-1">{t("损耗", "Loss")}</p>
                     <p className="font-mono tabular-nums text-stone-200">
                       {fmt(detailRecord.loss)} g
                     </p>
@@ -1895,7 +1953,7 @@ export default function GoldLedger() {
                 <div className="grid grid-cols-1 md:grid-cols-[1fr_100px_110px_auto] gap-2 mb-2">
                   <input
                     type="text"
-                    placeholder="描述"
+                    placeholder={t("描述", "Description")}
                     value={detailDesc}
                     onChange={(e) => setDetailDesc(e.target.value)}
                     className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500"
@@ -1903,7 +1961,7 @@ export default function GoldLedger() {
                   <input
                     type="number"
                     step="0.01"
-                    placeholder="+/- 克"
+                    placeholder={t("+/- 克", "+/- g")}
                     value={detailAmount}
                     onChange={(e) => setDetailAmount(e.target.value)}
                     className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500 font-mono"
@@ -1915,7 +1973,7 @@ export default function GoldLedger() {
                   >
                     {detailDestinations.map((d) => (
                       <option key={d} value={d}>
-                        {d === "" ? "去向" : d}
+                        {d === "" ? t("去向", "Destination") : d}
                       </option>
                     ))}
                   </select>
@@ -1932,20 +1990,20 @@ export default function GoldLedger() {
 
                 {editTransactions.length === 0 ? (
                   <p className="text-sm text-stone-600 py-3 text-center">
-                    这一天没有流水记录
+                    {t("这一天没有流水记录", "No entries for this day")}
                   </p>
                 ) : (
                   <div className="divide-y divide-stone-800 border-t border-stone-800 mb-4">
-                    {editTransactions.map((t) => (
+                    {editTransactions.map((t2) => (
                       <div
-                        key={t.id}
+                        key={t2.id}
                         className="flex items-center justify-between py-2 text-sm"
                       >
                         <div className="flex items-center gap-2 min-w-0">
-                          <span className="text-stone-300 truncate">{t.desc}</span>
-                          {t.dest && (
+                          <span className="text-stone-300 truncate">{t2.desc}</span>
+                          {t2.dest && (
                             <span className="text-xs text-stone-500 bg-stone-800 rounded px-2 py-0.5 shrink-0">
-                              {t.dest}
+                              {t2.dest}
                             </span>
                           )}
                         </div>
@@ -1953,13 +2011,13 @@ export default function GoldLedger() {
                           <span
                             className={
                               "font-mono tabular-nums " +
-                              (t.amount > 0 ? "text-emerald-400" : "text-rose-400")
+                              (t2.amount > 0 ? "text-emerald-400" : "text-rose-400")
                             }
                           >
-                            {fmt(t.amount)} g
+                            {fmt(t2.amount)} g
                           </span>
                           <button
-                            onClick={() => removeDetailRow(t.id)}
+                            onClick={() => removeDetailRow(t2.id)}
                             className="text-stone-600 hover:text-rose-400"
                           >
                             <Trash2 className="w-4 h-4" />
@@ -1972,7 +2030,7 @@ export default function GoldLedger() {
 
                 <div className="grid grid-cols-2 gap-2 mb-3">
                   <div>
-                    <label className="block text-xs text-stone-500 mb-1">日期</label>
+                    <label className="block text-xs text-stone-500 mb-1">{t("日期", "Date")}</label>
                     <input
                       type="date"
                       value={editDate}
@@ -1982,7 +2040,7 @@ export default function GoldLedger() {
                   </div>
                   <div>
                     <label className="block text-xs text-stone-500 mb-1">
-                      实重（克）
+                      {t("实重（克）", "Actual (g)")}
                     </label>
                     <input
                       type="number"
@@ -1996,13 +2054,13 @@ export default function GoldLedger() {
 
                 <div className="grid grid-cols-2 gap-3 mb-4">
                   <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
-                    <p className="text-xs text-stone-500 mb-1">要有（预览）</p>
+                    <p className="text-xs text-stone-500 mb-1">{t("要有（预览）", "Expected (preview)")}</p>
                     <p className="font-mono tabular-nums text-stone-200">
                       {detailExpected === null ? "-" : fmtPlain(detailExpected)} g
                     </p>
                   </div>
                   <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
-                    <p className="text-xs text-stone-500 mb-1">损耗（预览）</p>
+                    <p className="text-xs text-stone-500 mb-1">{t("损耗（预览）", "Loss (preview)")}</p>
                     <p className="font-mono tabular-nums text-stone-200">
                       {detailLoss === null ? "-" : fmt(detailLoss)} g
                     </p>
@@ -2010,7 +2068,10 @@ export default function GoldLedger() {
                 </div>
 
                 <p className="text-xs text-stone-600 mb-3">
-                  保存后会自动重新计算这天之后每一天的"要有"和"损耗"。
+                  {t(
+                    '保存后会自动重新计算这天之后每一天的"要有"和"损耗"。',
+                    "Saving will automatically recompute expected and loss for every day after this one."
+                  )}
                 </p>
 
                 {detailError && (
@@ -2026,7 +2087,7 @@ export default function GoldLedger() {
                   ) : (
                     <Save className="w-4 h-4" />
                   )}
-                  保存修改
+                  {t("保存修改", "Save changes")}
                 </button>
               </div>
             )}
@@ -2040,11 +2101,11 @@ export default function GoldLedger() {
         <>
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
             <h2 className="text-sm font-medium text-stone-300 mb-3">
-              第一步：登记出货（{SHIP_TO} 待确认）
+              {t(`第一步：登记出货（${SHIP_TO} 待确认）`, `Step 1: Log a shipment (${SHIP_TO} to confirm)`)}
             </h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
               <div>
-                <label className="block text-xs text-stone-500 mb-1">送出方</label>
+                <label className="block text-xs text-stone-500 mb-1">{t("送出方", "From")}</label>
                 <select
                   value={shipFrom}
                   onChange={(e) => setShipFrom(e.target.value)}
@@ -2058,7 +2119,7 @@ export default function GoldLedger() {
                 </select>
               </div>
               <div>
-                <label className="block text-xs text-stone-500 mb-1">出货日期</label>
+                <label className="block text-xs text-stone-500 mb-1">{t("出货日期", "Shipment date")}</label>
                 <input
                   type="date"
                   value={shipDate}
@@ -2071,7 +2132,7 @@ export default function GoldLedger() {
 
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
             <h2 className="text-sm font-medium text-stone-300 mb-3">
-              其他类别出货（戒指 / 链 / 牌 / 自定义）
+              {t("其他类别出货（戒指 / 链 / 牌 / 自定义）", "Other categories (rings / chains / plates / custom)")}
             </h2>
             <div className="grid grid-cols-1 md:grid-cols-[130px_1fr_120px_auto] gap-2 mb-2">
               <select
@@ -2081,14 +2142,14 @@ export default function GoldLedger() {
               >
                 {SHIP_CATEGORIES.map((c) => (
                   <option key={c} value={c}>
-                    {c === "OTHER" ? "自定义…" : c}
+                    {c === "OTHER" ? t("自定义…", "Custom…") : c}
                   </option>
                 ))}
               </select>
               {shipCategory === "OTHER" && (
                 <input
                   type="text"
-                  placeholder="类别名称"
+                  placeholder={t("类别名称", "Category name")}
                   value={shipCategoryCustom}
                   onChange={(e) => setShipCategoryCustom(e.target.value)}
                   className="bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500"
@@ -2097,7 +2158,7 @@ export default function GoldLedger() {
               <input
                 type="number"
                 step="0.01"
-                placeholder="重量(g)"
+                placeholder={t("重量(g)", "Weight (g)")}
                 value={shipWeight}
                 onChange={(e) => setShipWeight(e.target.value)}
                 className={
@@ -2110,7 +2171,7 @@ export default function GoldLedger() {
                 className="flex items-center justify-center gap-1 bg-stone-800 hover:bg-stone-700 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100"
               >
                 <Plus className="w-4 h-4" />
-                添加
+                {t("添加", "Add")}
               </button>
             </div>
             {shipRowError && (
@@ -2168,14 +2229,14 @@ export default function GoldLedger() {
               className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6"
             >
               <h2 className="text-sm font-medium text-stone-300 mb-3">
-                {g.label} 出货数量
+                {g.label} {t("出货数量", "shipped quantity")}
               </h2>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-xs text-stone-500 border-b border-stone-800">
-                      <th className="text-left py-2 font-normal">面额</th>
-                      <th className="text-right py-2 font-normal w-28">数量</th>
+                      <th className="text-left py-2 font-normal">{t("面额", "Denomination")}</th>
+                      <th className="text-right py-2 font-normal w-28">{t("数量", "Qty")}</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-stone-800">
@@ -2201,14 +2262,14 @@ export default function GoldLedger() {
               </div>
               <div className="grid grid-cols-2 gap-3 mt-3">
                 <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
-                  <p className="text-xs text-stone-500 mb-1">按面额计算小计</p>
+                  <p className="text-xs text-stone-500 mb-1">{t("按面额计算小计", "Subtotal by denomination")}</p>
                   <p className="font-mono tabular-nums text-stone-200">
                     {fmtPlain(g.state.calc)} g
                   </p>
                 </div>
                 <div>
                   <label className="block text-xs text-stone-500 mb-1">
-                    实重（过秤读数，可选）
+                    {t("实重（过秤读数，可选）", "Actual (scale reading, optional)")}
                   </label>
                   <input
                     type="number"
@@ -2235,30 +2296,33 @@ export default function GoldLedger() {
                     }
                   >
                     {g.state.overTolerance && <AlertTriangle className="w-3.5 h-3.5" />}
-                    实重跟小计差 {fmt(g.state.diff)} g
+                    {t("实重跟小计差", "Actual differs from subtotal by")} {fmt(g.state.diff)} g
                   </p>
                   {g.state.overTolerance && !g.confirmed && (
                     <button
                       onClick={() => g.setConfirmed(true)}
                       className="mt-2 text-xs px-3 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/40 text-rose-400"
                     >
-                      差异较大，确认使用这个实重
+                      {t("差异较大，确认使用这个实重", "Large difference — confirm to use this weight")}
                     </button>
                   )}
                   {g.state.overTolerance && g.confirmed && (
-                    <p className="text-xs text-stone-500 mt-1">已确认，可以保存</p>
+                    <p className="text-xs text-stone-500 mt-1">{t("已确认，可以保存", "Confirmed, ready to save")}</p>
                   )}
                 </div>
               )}
               <p className="text-xs text-stone-600 mt-2">
-                1 DINAR 按 4.25g、1/2 DINAR 按 2.125g 计算；实重跟小计差超过{DENOM_TOLERANCE}g会标红，需要点确认才能保存。
+                {t(
+                  `1 DINAR 按 4.25g、1/2 DINAR 按 2.125g 计算；实重跟小计差超过${DENOM_TOLERANCE}g会标红，需要点确认才能保存。`,
+                  `1 DINAR = 4.25g, 1/2 DINAR = 2.125g. A difference over ${DENOM_TOLERANCE}g between actual and subtotal is flagged and needs confirmation before saving.`
+                )}
               </p>
             </div>
           ))}
 
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
             <label className="block text-xs text-stone-500 mb-1">
-              {shipFrom} 流水描述（会自动写进当天流水，可以改）
+              {t(`${shipFrom} 流水描述（会自动写进当天流水，可以改）`, `${shipFrom} flow description (auto-written to today's flow, editable)`)}
             </label>
             <input
               type="text"
@@ -2267,7 +2331,10 @@ export default function GoldLedger() {
               className="w-full md:w-96 bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
             />
             <p className="text-xs text-stone-600 mt-2">
-              保存时会自动生成单号（HQ开头），并写入 {shipFrom} 当天流水（减），去向标为 {SHIP_TO}。
+              {t(
+                `保存时会自动在描述后面加上类别，并写入 ${shipFrom} 当天流水（减），去向标为 ${SHIP_TO}。单号由 ${SHIP_TO} 确认接收时填写。`,
+                `On save, the category is appended to the description automatically and written to ${shipFrom}'s flow for today (minus), tagged to ${SHIP_TO}. The serial number is filled in by ${SHIP_TO} when confirming receipt.`
+              )}
             </p>
           </div>
 
@@ -2281,17 +2348,17 @@ export default function GoldLedger() {
             ) : (
               <Save className="w-4 h-4" />
             )}
-            保存这次出货
+            {t("保存这次出货", "Save this shipment")}
           </button>
           {shipMsg && <p className="text-xs text-stone-400 mb-6">{shipMsg}</p>}
 
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
             <h2 className="text-sm font-medium text-stone-300 mb-3">
-              待确认（{pendingShipments.length}）
+              {t(`待确认（${pendingShipments.length}）`, `Pending (${pendingShipments.length})`)}
             </h2>
             {pendingShipments.length === 0 ? (
               <p className="text-sm text-stone-600 py-4 text-center">
-                没有等待确认的出货
+                {t("没有等待确认的出货", "No shipments pending confirmation")}
               </p>
             ) : (
               <div className="space-y-3">
@@ -2302,7 +2369,9 @@ export default function GoldLedger() {
                   >
                     <div className="flex items-center justify-between flex-wrap gap-2">
                       <div className="text-sm text-stone-300">
-                        <span className="text-stone-600 italic">单号待{SHIP_TO}填写</span>
+                        <span className="text-stone-600 italic">
+                          {t(`单号待${SHIP_TO}填写`, `Serial pending from ${SHIP_TO}`)}
+                        </span>
                         {"  "}
                         {r.fromWorker} → {r.toWorker}
                         <span className="text-stone-500 ml-2">{r.date}</span>
@@ -2326,7 +2395,7 @@ export default function GoldLedger() {
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
                           <div>
                             <label className="block text-xs text-stone-500 mb-1">
-                              确认日期
+                              {t("确认日期", "Confirm date")}
                             </label>
                             <input
                               type="date"
@@ -2337,7 +2406,7 @@ export default function GoldLedger() {
                           </div>
                           <div>
                             <label className="block text-xs text-stone-500 mb-1">
-                              {SHIP_TO} 重量(g)
+                              {SHIP_TO} {t("重量(g)", "weight (g)")}
                             </label>
                             <input
                               type="number"
@@ -2349,11 +2418,11 @@ export default function GoldLedger() {
                           </div>
                           <div>
                             <label className="block text-xs text-stone-500 mb-1">
-                              单号
+                              {t("单号", "Serial no.")}
                             </label>
                             <input
                               type="text"
-                              placeholder="例如 HQ2608081"
+                              placeholder={t("例如 HQ2608081", "e.g. HQ2608081")}
                               value={shipConfirmSerial}
                               onChange={(e) => setShipConfirmSerial(e.target.value)}
                               className="w-full bg-stone-900 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500"
@@ -2363,7 +2432,7 @@ export default function GoldLedger() {
                         {shipConfirmWeight !== "" &&
                           !Number.isNaN(parseFloat(shipConfirmWeight)) && (
                             <p className="text-xs text-stone-500 mb-2">
-                              差异预览：
+                              {t("差异预览：", "Diff preview:")}
                               <span
                                 className={
                                   Math.abs(parseFloat(shipConfirmWeight) - r.sentTotal) >
@@ -2391,13 +2460,13 @@ export default function GoldLedger() {
                             ) : (
                               <CheckCircle2 className="w-4 h-4" />
                             )}
-                            确认接收
+                            {t("确认接收", "Confirm receipt")}
                           </button>
                           <button
                             onClick={() => setShipConfirmingId(null)}
                             className="text-xs px-3 py-2 rounded-lg text-stone-500 hover:text-stone-300"
                           >
-                            取消
+                            {t("取消", "Cancel")}
                           </button>
                         </div>
                       </div>
@@ -2406,7 +2475,7 @@ export default function GoldLedger() {
                         onClick={() => openShipConfirm(r)}
                         className="mt-2 text-xs px-3 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
                       >
-                        {SHIP_TO} 确认接收
+                        {SHIP_TO} {t("确认接收", "confirm receipt")}
                       </button>
                     )}
                   </div>
@@ -2417,7 +2486,7 @@ export default function GoldLedger() {
 
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
             <label className="block text-xs text-stone-500 mb-1">
-              误差标红阈值（超过这个数就标红，克）
+              {t("误差标红阈值（超过这个数就标红，克）", "Diff alert threshold (flagged above this, g)")}
             </label>
             <div className="flex items-center gap-2">
               <input
@@ -2432,10 +2501,10 @@ export default function GoldLedger() {
                 onClick={saveShipThreshold}
                 className="text-xs px-3 py-2 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
               >
-                更新阈值
+                {t("更新阈值", "Update threshold")}
               </button>
               <span className="text-xs text-stone-600">
-                当前生效：{fmtPlain(shipmentData.threshold ?? 0.05)} g
+                {t("当前生效：", "Currently:")} {fmtPlain(shipmentData.threshold ?? 0.05)} g
               </span>
             </div>
           </div>
@@ -2443,23 +2512,23 @@ export default function GoldLedger() {
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5">
             <h2 className="text-sm font-medium text-stone-300 mb-3 flex items-center gap-2">
               <Truck className="w-4 h-4" />
-              已确认（{confirmedShipments.length}）
+              {t(`已确认（${confirmedShipments.length}）`, `Confirmed (${confirmedShipments.length})`)}
             </h2>
             {confirmedShipments.length === 0 ? (
               <p className="text-sm text-stone-600 py-4 text-center">
-                还没有已确认的出货
+                {t("还没有已确认的出货", "No confirmed shipments yet")}
               </p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-xs text-stone-500 border-b border-stone-800">
-                      <th className="text-left py-2 font-normal">单号</th>
-                      <th className="text-left py-2 font-normal">送出方</th>
-                      <th className="text-left py-2 font-normal">明细</th>
-                      <th className="text-right py-2 font-normal">送出</th>
+                      <th className="text-left py-2 font-normal">{t("单号", "Serial")}</th>
+                      <th className="text-left py-2 font-normal">{t("送出方", "From")}</th>
+                      <th className="text-left py-2 font-normal">{t("明细", "Details")}</th>
+                      <th className="text-right py-2 font-normal">{t("送出", "Sent")}</th>
                       <th className="text-right py-2 font-normal">{SHIP_TO}</th>
-                      <th className="text-right py-2 font-normal">差异</th>
+                      <th className="text-right py-2 font-normal">{t("差异", "Diff")}</th>
                       <th className="text-right py-2 font-normal"></th>
                     </tr>
                   </thead>
@@ -2522,31 +2591,36 @@ export default function GoldLedger() {
               onClick={() => setShowQuickTransfer((v) => !v)}
               className="text-xs px-3 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
             >
-              {showQuickTransfer ? "收起一次性登记" : "一次性登记（送出+接收一起填）"}
+              {showQuickTransfer
+                ? t("收起一次性登记", "Hide quick entry")
+                : t("一次性登记（送出+接收一起填）", "Quick entry (fill send + receive together)")}
             </button>
             {showQuickTransfer && (
               <div className="mt-4">
                 <p className="text-xs text-stone-500 mb-3">
-                  适合送出方已经把重量都告诉接收方、想一次填完两边的情况。保存后直接是"已确认"状态，两边的流水会同时写进去。
+                  {t(
+                    '适合送出方已经把重量都告诉接收方、想一次填完两边的情况。保存后直接是"已确认"状态，两边的流水会同时写进去。',
+                    'For when the sender already told the receiver the weight and you want to fill both sides at once. Saves directly as "confirmed" and writes both flows at the same time.'
+                  )}
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
                   <div>
-                    <label className="block text-xs text-stone-500 mb-1">类型</label>
+                    <label className="block text-xs text-stone-500 mb-1">{t("类型", "Type")}</label>
                     <select
                       value={quickType}
                       onChange={(e) => setQuickType(e.target.value)}
                       className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
                     >
-                      {TRANSFER_TYPE_PRESETS.map((t) => (
-                        <option key={t} value={t}>
-                          {t}
+                      {TRANSFER_TYPE_PRESETS.map((tp) => (
+                        <option key={tp} value={tp}>
+                          {tp}
                         </option>
                       ))}
-                      <option value="OTHER">自定义…</option>
+                      <option value="OTHER">{t("自定义…", "Custom…")}</option>
                     </select>
                   </div>
                   <div>
-                    <label className="block text-xs text-stone-500 mb-1">送出方</label>
+                    <label className="block text-xs text-stone-500 mb-1">{t("送出方", "From")}</label>
                     <select
                       value={quickFrom}
                       onChange={(e) => setQuickFrom(e.target.value)}
@@ -2560,7 +2634,7 @@ export default function GoldLedger() {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-xs text-stone-500 mb-1">接收方</label>
+                    <label className="block text-xs text-stone-500 mb-1">{t("接收方", "To")}</label>
                     <select
                       value={quickTo}
                       onChange={(e) => setQuickTo(e.target.value)}
@@ -2577,7 +2651,7 @@ export default function GoldLedger() {
                 {quickType === "OTHER" && (
                   <input
                     type="text"
-                    placeholder="自定义类型名称"
+                    placeholder={t("自定义类型名称", "Custom type name")}
                     value={quickTypeCustom}
                     onChange={(e) => setQuickTypeCustom(e.target.value)}
                     className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500 mb-3"
@@ -2586,7 +2660,7 @@ export default function GoldLedger() {
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3 pb-3 border-b border-stone-800">
                   <div>
-                    <label className="block text-xs text-stone-500 mb-1">送出日期</label>
+                    <label className="block text-xs text-stone-500 mb-1">{t("送出日期", "Sent date")}</label>
                     <input
                       type="date"
                       value={quickSentDate}
@@ -2595,7 +2669,7 @@ export default function GoldLedger() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs text-stone-500 mb-1">送出方重量(g)</label>
+                    <label className="block text-xs text-stone-500 mb-1">{t("送出方重量(g)", "Sent weight (g)")}</label>
                     <input
                       type="number"
                       step="0.01"
@@ -2606,7 +2680,7 @@ export default function GoldLedger() {
                   </div>
                   <div>
                     <label className="block text-xs text-stone-500 mb-1">
-                      {quickFrom} 流水描述
+                      {quickFrom} {t("流水描述", "flow description")}
                     </label>
                     <input
                       type="text"
@@ -2619,7 +2693,7 @@ export default function GoldLedger() {
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
                   <div>
-                    <label className="block text-xs text-stone-500 mb-1">接收日期</label>
+                    <label className="block text-xs text-stone-500 mb-1">{t("接收日期", "Received date")}</label>
                     <input
                       type="date"
                       value={quickReceivedDate}
@@ -2628,7 +2702,7 @@ export default function GoldLedger() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs text-stone-500 mb-1">接收方重量(g)</label>
+                    <label className="block text-xs text-stone-500 mb-1">{t("接收方重量(g)", "Received weight (g)")}</label>
                     <input
                       type="number"
                       step="0.01"
@@ -2639,7 +2713,7 @@ export default function GoldLedger() {
                   </div>
                   <div>
                     <label className="block text-xs text-stone-500 mb-1">
-                      {quickTo} 流水描述
+                      {quickTo} {t("流水描述", "flow description")}
                     </label>
                     <input
                       type="text"
@@ -2655,7 +2729,7 @@ export default function GoldLedger() {
                   !Number.isNaN(parseFloat(quickSentWeight)) &&
                   !Number.isNaN(parseFloat(quickReceivedWeight)) && (
                     <p className="text-xs text-stone-500 mb-2">
-                      差异预览：
+                      {t("差异预览：", "Diff preview:")}
                       <span
                         className={
                           Math.abs(parseFloat(quickReceivedWeight) - parseFloat(quickSentWeight)) >
@@ -2680,7 +2754,7 @@ export default function GoldLedger() {
                   ) : (
                     <Save className="w-4 h-4" />
                   )}
-                  一次性保存（送出+接收）
+                  {t("一次性保存（送出+接收）", "Save at once (send + receive)")}
                 </button>
                 {quickMsg && <p className="text-xs text-stone-400 mt-2">{quickMsg}</p>}
               </div>
@@ -2689,26 +2763,26 @@ export default function GoldLedger() {
 
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
             <h2 className="text-sm font-medium text-stone-300 mb-3">
-              第一步：送出方先保存重量
+              {t("第一步：送出方先保存重量", "Step 1: Sender saves weight first")}
             </h2>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
               <div>
-                <label className="block text-xs text-stone-500 mb-1">类型</label>
+                <label className="block text-xs text-stone-500 mb-1">{t("类型", "Type")}</label>
                 <select
                   value={transType}
                   onChange={(e) => setTransType(e.target.value)}
                   className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
                 >
-                  {TRANSFER_TYPE_PRESETS.map((t) => (
-                    <option key={t} value={t}>
-                      {t}
+                  {TRANSFER_TYPE_PRESETS.map((tp) => (
+                    <option key={tp} value={tp}>
+                      {tp}
                     </option>
                   ))}
-                  <option value="OTHER">自定义…</option>
+                  <option value="OTHER">{t("自定义…", "Custom…")}</option>
                 </select>
               </div>
               <div>
-                <label className="block text-xs text-stone-500 mb-1">送出方</label>
+                <label className="block text-xs text-stone-500 mb-1">{t("送出方", "From")}</label>
                 <select
                   value={transFrom}
                   onChange={(e) => setTransFrom(e.target.value)}
@@ -2722,7 +2796,7 @@ export default function GoldLedger() {
                 </select>
               </div>
               <div>
-                <label className="block text-xs text-stone-500 mb-1">接收方</label>
+                <label className="block text-xs text-stone-500 mb-1">{t("接收方", "To")}</label>
                 <select
                   value={transTo}
                   onChange={(e) => setTransTo(e.target.value)}
@@ -2739,7 +2813,7 @@ export default function GoldLedger() {
             {transType === "OTHER" && (
               <input
                 type="text"
-                placeholder="自定义类型名称"
+                placeholder={t("自定义类型名称", "Custom type name")}
                 value={transTypeCustom}
                 onChange={(e) => setTransTypeCustom(e.target.value)}
                 className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500 mb-3"
@@ -2747,7 +2821,7 @@ export default function GoldLedger() {
             )}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
               <div>
-                <label className="block text-xs text-stone-500 mb-1">送出日期</label>
+                <label className="block text-xs text-stone-500 mb-1">{t("送出日期", "Sent date")}</label>
                 <input
                   type="date"
                   value={transSentDate}
@@ -2756,7 +2830,7 @@ export default function GoldLedger() {
                 />
               </div>
               <div>
-                <label className="block text-xs text-stone-500 mb-1">送出方重量(g)</label>
+                <label className="block text-xs text-stone-500 mb-1">{t("送出方重量(g)", "Sent weight (g)")}</label>
                 <input
                   type="number"
                   step="0.01"
@@ -2767,7 +2841,7 @@ export default function GoldLedger() {
               </div>
               <div>
                 <label className="block text-xs text-stone-500 mb-1">
-                  {transFrom} 流水描述（会自动写进当天流水，可以改）
+                  {t(`${transFrom} 流水描述（会自动写进当天流水，可以改）`, `${transFrom} flow description (auto-written today, editable)`)}
                 </label>
                 <input
                   type="text"
@@ -2788,18 +2862,18 @@ export default function GoldLedger() {
               ) : (
                 <Save className="w-4 h-4" />
               )}
-              保存送出方重量（半保存）
+              {t("保存送出方重量（半保存）", "Save sender weight (partial save)")}
             </button>
             {transMsg && <p className="text-xs text-stone-400 mt-2">{transMsg}</p>}
           </div>
 
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
             <h2 className="text-sm font-medium text-stone-300 mb-3">
-              待确认（{pendingTransfers.length}）
+              {t(`待确认（${pendingTransfers.length}）`, `Pending (${pendingTransfers.length})`)}
             </h2>
             {pendingTransfers.length === 0 ? (
               <p className="text-sm text-stone-600 py-4 text-center">
-                没有等待确认的记录
+                {t("没有等待确认的记录", "No records pending confirmation")}
               </p>
             ) : (
               <div className="space-y-3">
@@ -2828,7 +2902,7 @@ export default function GoldLedger() {
                       </div>
                     </div>
                     <p className="text-xs text-stone-600 mt-1">
-                      送出方流水：{r.sentDesc}
+                      {t("送出方流水：", "Sender flow:")}{r.sentDesc}
                     </p>
 
                     {confirmingId === r.id ? (
@@ -2836,7 +2910,7 @@ export default function GoldLedger() {
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
                           <div>
                             <label className="block text-xs text-stone-500 mb-1">
-                              接收日期
+                              {t("接收日期", "Received date")}
                             </label>
                             <input
                               type="date"
@@ -2847,7 +2921,7 @@ export default function GoldLedger() {
                           </div>
                           <div>
                             <label className="block text-xs text-stone-500 mb-1">
-                              接收方重量(g)
+                              {t("接收方重量(g)", "Received weight (g)")}
                             </label>
                             <input
                               type="number"
@@ -2859,7 +2933,7 @@ export default function GoldLedger() {
                           </div>
                           <div>
                             <label className="block text-xs text-stone-500 mb-1">
-                              {r.toWorker} 流水描述
+                              {r.toWorker} {t("流水描述", "flow description")}
                             </label>
                             <input
                               type="text"
@@ -2871,7 +2945,7 @@ export default function GoldLedger() {
                         </div>
                         {confirmWeight !== "" && !Number.isNaN(parseFloat(confirmWeight)) && (
                           <p className="text-xs text-stone-500 mb-2">
-                            差异预览：
+                            {t("差异预览：", "Diff preview:")}
                             <span
                               className={
                                 Math.abs(parseFloat(confirmWeight) - r.sentWeight) >
@@ -2899,13 +2973,13 @@ export default function GoldLedger() {
                             ) : (
                               <CheckCircle2 className="w-4 h-4" />
                             )}
-                            确认接收
+                            {t("确认接收", "Confirm receipt")}
                           </button>
                           <button
                             onClick={() => setConfirmingId(null)}
                             className="text-xs px-3 py-2 rounded-lg text-stone-500 hover:text-stone-300"
                           >
-                            取消
+                            {t("取消", "Cancel")}
                           </button>
                         </div>
                       </div>
@@ -2914,7 +2988,7 @@ export default function GoldLedger() {
                         onClick={() => openConfirm(r)}
                         className="mt-2 text-xs px-3 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
                       >
-                        {r.toWorker} 确认接收
+                        {r.toWorker} {t("确认接收", "confirm receipt")}
                       </button>
                     )}
                   </div>
@@ -2925,7 +2999,7 @@ export default function GoldLedger() {
 
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
             <label className="block text-xs text-stone-500 mb-1">
-              误差标红阈值（超过这个数就标红，克）
+              {t("误差标红阈值（超过这个数就标红，克）", "Diff alert threshold (flagged above this, g)")}
             </label>
             <div className="flex items-center gap-2">
               <input
@@ -2940,10 +3014,10 @@ export default function GoldLedger() {
                 onClick={saveThreshold}
                 className="text-xs px-3 py-2 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
               >
-                更新阈值
+                {t("更新阈值", "Update threshold")}
               </button>
               <span className="text-xs text-stone-600">
-                当前生效：{fmtPlain(transferData.threshold ?? 0.05)} g
+                {t("当前生效：", "Currently:")} {fmtPlain(transferData.threshold ?? 0.05)} g
               </span>
             </div>
           </div>
@@ -2951,22 +3025,22 @@ export default function GoldLedger() {
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5">
             <h2 className="text-sm font-medium text-stone-300 mb-3 flex items-center gap-2">
               <ArrowLeftRight className="w-4 h-4" />
-              已确认（{confirmedTransfers.length}）
+              {t(`已确认（${confirmedTransfers.length}）`, `Confirmed (${confirmedTransfers.length})`)}
             </h2>
             {confirmedTransfers.length === 0 ? (
               <p className="text-sm text-stone-600 py-4 text-center">
-                还没有已确认的记录
+                {t("还没有已确认的记录", "No confirmed records yet")}
               </p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-xs text-stone-500 border-b border-stone-800">
-                      <th className="text-left py-2 font-normal">类型</th>
-                      <th className="text-left py-2 font-normal">送出→接收</th>
-                      <th className="text-right py-2 font-normal">送出</th>
-                      <th className="text-right py-2 font-normal">接收</th>
-                      <th className="text-right py-2 font-normal">差异</th>
+                      <th className="text-left py-2 font-normal">{t("类型", "Type")}</th>
+                      <th className="text-left py-2 font-normal">{t("送出→接收", "From → To")}</th>
+                      <th className="text-right py-2 font-normal">{t("送出", "Sent")}</th>
+                      <th className="text-right py-2 font-normal">{t("接收", "Received")}</th>
+                      <th className="text-right py-2 font-normal">{t("差异", "Diff")}</th>
                       <th className="text-right py-2 font-normal"></th>
                     </tr>
                   </thead>
@@ -3023,14 +3097,14 @@ export default function GoldLedger() {
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-medium text-stone-300 flex items-center gap-2">
               <Users className="w-4 h-4" />
-              账号管理（{adminUsers.length}）
+              {t(`账号管理（${adminUsers.length}）`, `Accounts (${adminUsers.length})`)}
             </h2>
             <button
               onClick={loadAdminUsers}
               disabled={adminUsersLoading}
               className="text-xs px-3 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-400 hover:text-stone-200 disabled:opacity-60"
             >
-              {adminUsersLoading ? "刷新中…" : "刷新"}
+              {adminUsersLoading ? t("刷新中…", "Refreshing…") : t("刷新", "Refresh")}
             </button>
           </div>
           {adminUsersError && (
@@ -3038,16 +3112,16 @@ export default function GoldLedger() {
           )}
           {adminUsers.length === 0 ? (
             <p className="text-sm text-stone-600 py-4 text-center">
-              {adminUsersLoading ? "加载中…" : "还没有账号"}
+              {adminUsersLoading ? t("加载中…", "Loading…") : t("还没有账号", "No accounts yet")}
             </p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-xs text-stone-500 border-b border-stone-800">
-                    <th className="text-left py-2 font-normal">账号</th>
-                    <th className="text-left py-2 font-normal">角色</th>
-                    <th className="text-left py-2 font-normal">建立时间</th>
+                    <th className="text-left py-2 font-normal">{t("账号", "Account")}</th>
+                    <th className="text-left py-2 font-normal">{t("角色", "Role")}</th>
+                    <th className="text-left py-2 font-normal">{t("建立时间", "Created")}</th>
                     <th className="text-right py-2 font-normal"></th>
                   </tr>
                 </thead>
@@ -3092,7 +3166,10 @@ export default function GoldLedger() {
             </div>
           )}
           <p className="text-xs text-stone-600 mt-3">
-            新建账号请去 Supabase 后台 Authentication → Users → Add user。删除需要先部署好 Edge Function（见下方说明）。
+            {t(
+              "新建账号请去 Supabase 后台 Authentication → Users → Add user。删除需要先部署好 Edge Function（见下方说明）。",
+              "To create an account, go to Supabase → Authentication → Users → Add user. Deletion requires the Edge Function to be deployed first (see instructions)."
+            )}
           </p>
         </div>
       )}
