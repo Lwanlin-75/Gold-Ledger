@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  min-height: 100%;
+}
+
+/* 手机上输入框字体不能小于16px，不然iOS Safari点击输入框时会自动放大整个页面 */
+@media (max-width: 767px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
