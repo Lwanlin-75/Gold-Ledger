@@ -1157,6 +1157,21 @@ export default function GoldLedger() {
       });
   }
 
+  // 直接删掉待配对列表里的这条流水记录本身（不只是从配对列表移除，
+  // 因为这些本来就是各worker今日流水里的记录，删了就是从流水里删掉了）
+  function deleteUnmatchedItem(item) {
+    if (
+      !window.confirm(
+        t(
+          `确定删除这条流水记录？（${item.worker} · ${item.date} · ${item.desc}，这是真的从流水里删掉，不是撤销配对）`,
+          `Delete this flow entry? (${item.worker} · ${item.date} · ${item.desc} — this really removes it from the flow, not just from the pairing list.)`
+        )
+      )
+    )
+      return;
+    removeDraftItemLocal(item.worker, item.date, item.id);
+  }
+
   async function saveDay() {
     setActualError("");
     setSaveMsg("");
@@ -2859,26 +2874,37 @@ export default function GoldLedger() {
                         const key = itemKey(item);
                         const selected = key === selectedOutgoingKey;
                         return (
-                          <button
+                          <div
                             key={key}
-                            onClick={() => setSelectedOutgoingKey(selected ? null : key)}
                             className={
-                              "w-full text-left rounded-lg p-3 border transition-colors " +
+                              "flex items-stretch gap-1 rounded-lg border transition-colors " +
                               (selected
                                 ? "bg-amber-500/10 border-amber-500/50"
                                 : "bg-stone-950 border-stone-800 hover:border-stone-700")
                             }
                           >
-                            <div className="flex items-center justify-between text-sm">
-                              <span className="text-stone-300">{item.worker}</span>
-                              <span className="font-mono tabular-nums text-rose-400">
-                                {fmt(item.amount)} g
-                              </span>
-                            </div>
-                            <p className="text-xs text-stone-500 mt-0.5">
-                              {item.date} · {item.desc} → {item.dest}
-                            </p>
-                          </button>
+                            <button
+                              onClick={() => setSelectedOutgoingKey(selected ? null : key)}
+                              className="flex-1 min-w-0 text-left p-3"
+                            >
+                              <div className="flex items-center justify-between text-sm">
+                                <span className="text-stone-300">{item.worker}</span>
+                                <span className="font-mono tabular-nums text-rose-400">
+                                  {fmt(item.amount)} g
+                                </span>
+                              </div>
+                              <p className="text-xs text-stone-500 mt-0.5 truncate">
+                                {item.date} · {item.desc} → {item.dest}
+                              </p>
+                            </button>
+                            <button
+                              onClick={() => deleteUnmatchedItem(item)}
+                              className="shrink-0 px-3 flex items-center text-stone-600 hover:text-rose-400"
+                              aria-label={t("删除这条记录", "Delete this entry")}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                         );
                       })}
                     </div>
@@ -2899,26 +2925,37 @@ export default function GoldLedger() {
                         const key = itemKey(item);
                         const selected = key === selectedIncomingKey;
                         return (
-                          <button
+                          <div
                             key={key}
-                            onClick={() => setSelectedIncomingKey(selected ? null : key)}
                             className={
-                              "w-full text-left rounded-lg p-3 border transition-colors " +
+                              "flex items-stretch gap-1 rounded-lg border transition-colors " +
                               (selected
                                 ? "bg-amber-500/10 border-amber-500/50"
                                 : "bg-stone-950 border-stone-800 hover:border-stone-700")
                             }
                           >
-                            <div className="flex items-center justify-between text-sm">
-                              <span className="text-stone-300">{item.worker}</span>
-                              <span className="font-mono tabular-nums text-emerald-400">
-                                {fmt(item.amount)} g
-                              </span>
-                            </div>
-                            <p className="text-xs text-stone-500 mt-0.5">
-                              {item.date} · {item.desc} ← {item.dest}
-                            </p>
-                          </button>
+                            <button
+                              onClick={() => setSelectedIncomingKey(selected ? null : key)}
+                              className="flex-1 min-w-0 text-left p-3"
+                            >
+                              <div className="flex items-center justify-between text-sm">
+                                <span className="text-stone-300">{item.worker}</span>
+                                <span className="font-mono tabular-nums text-emerald-400">
+                                  {fmt(item.amount)} g
+                                </span>
+                              </div>
+                              <p className="text-xs text-stone-500 mt-0.5 truncate">
+                                {item.date} · {item.desc} ← {item.dest}
+                              </p>
+                            </button>
+                            <button
+                              onClick={() => deleteUnmatchedItem(item)}
+                              className="shrink-0 px-3 flex items-center text-stone-600 hover:text-rose-400"
+                              aria-label={t("删除这条记录", "Delete this entry")}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                         );
                       })}
                     </div>
