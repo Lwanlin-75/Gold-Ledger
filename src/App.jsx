@@ -93,6 +93,13 @@ function denomTotal(qtyObj) {
   );
 }
 
+// 生成"面额g×数量"的明细字符串，例如 "5.00g×2、10.00g×1"
+function denomBreakdown(qtyObj) {
+  return DENOMINATIONS.filter((d) => parseFloat(qtyObj[d.key] || 0) > 0)
+    .map((d) => `${d.label}g×${qtyObj[d.key]}`)
+    .join("、");
+}
+
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -214,6 +221,7 @@ export default function GoldLedger() {
   const [shipDate, setShipDate] = useState(todayStr());
   const [shipCategory, setShipCategory] = useState(SHIP_CATEGORIES[0]);
   const [shipCategoryCustom, setShipCategoryCustom] = useState("");
+  const [shipIsCustomOrder, setShipIsCustomOrder] = useState(false);
   const [shipWeight, setShipWeight] = useState("");
   const [shipItems, setShipItems] = useState([]);
   const [shipRowError, setShipRowError] = useState("");
@@ -269,6 +277,13 @@ export default function GoldLedger() {
   const [quickError, setQuickError] = useState("");
   const [quickSaving, setQuickSaving] = useState(false);
   const [quickMsg, setQuickMsg] = useState("");
+
+  // 转手核对：自由配对模式（不需要双重确认）
+  const [transferMode, setTransferMode] = useState("match");
+  const [selectedOutgoingKey, setSelectedOutgoingKey] = useState(null);
+  const [selectedIncomingKey, setSelectedIncomingKey] = useState(null);
+  const [matchSaving, setMatchSaving] = useState(false);
+  const [matchMsg, setMatchMsg] = useState("");
 
   // 账号管理（仅admin）
   const [adminUsers, setAdminUsers] = useState([]);
@@ -534,9 +549,10 @@ export default function GoldLedger() {
 
   // ---- 出货记录 ----
   function addShipItem() {
-    const cat = shipCategory === "OTHER" ? shipCategoryCustom.trim() : shipCategory;
+    const baseCat = shipCategory === "OTHER" ? shipCategoryCustom.trim() : shipCategory;
+    const cat = shipIsCustomOrder ? `订工-${baseCat}` : baseCat;
     const w = parseFloat(shipWeight);
-    if (!cat) {
+    if (!baseCat) {
       setShipRowError("请填写类别");
       return;
     }
@@ -558,7 +574,12 @@ export default function GoldLedger() {
   }
 
   function itemsSummary(items) {
-    return (items || []).map((i) => `${i.category} ${fmtPlain(i.weight)}g`).join("、");
+    return (items || [])
+      .map(
+        (i) =>
+          `${i.category} ${fmtPlain(i.weight)}g` + (i.breakdown ? `（${i.breakdown}）` : "")
+      )
+      .join("、");
   }
 
   function canSaveShipment() {
@@ -592,6 +613,7 @@ export default function GoldLedger() {
         id: Date.now() + Math.random(),
         category: "GOLDBAR",
         weight: Math.round(goldbarState.finalWeight * 100) / 100,
+        breakdown: denomBreakdown(goldbarQty),
       });
     }
     if (goldbeanState.finalWeight > 0) {
@@ -599,6 +621,7 @@ export default function GoldLedger() {
         id: Date.now() + Math.random(),
         category: "GOLDBEAN",
         weight: Math.round(goldbeanState.finalWeight * 100) / 100,
+        breakdown: denomBreakdown(goldbeanQty),
       });
     }
     if (items.length === 0) {
@@ -1024,6 +1047,115 @@ export default function GoldLedger() {
         .sort((a, b) => b.receivedDate.localeCompare(a.receivedDate)),
     [transferData.history]
   );
+
+  // ---- 自由配对模式 ----
+  const matchRecords = useMemo(
+    () => transferData.history.filter((r) => r.kind === "match"),
+    [transferData.history]
+  );
+  const matchedItemIds = useMemo(() => {
+    const s = new Set();
+    for (const r of matchRecords) {
+      s.add(r.itemIdA);
+      s.add(r.itemIdB);
+    }
+    return s;
+  }, [matchRecords]);
+
+  const matchableItems = useMemo(() => {
+    const items = [];
+    for (const w of WORKERS) {
+      const drafts = (data[w] && data[w].drafts) || {};
+      for (const date of Object.keys(drafts)) {
+        for (const item of drafts[date] || []) {
+          if (WORKERS.includes(item.dest) && !matchedItemIds.has(item.id)) {
+            items.push({ ...item, worker: w, date });
+          }
+        }
+      }
+    }
+    return items;
+  }, [data, matchedItemIds]);
+
+  function itemKey(item) {
+    return `${item.worker}|${item.date}|${item.id}`;
+  }
+  const outgoingItems = useMemo(
+    () =>
+      matchableItems
+        .filter((i) => i.amount < 0)
+        .sort((a, b) => b.date.localeCompare(a.date)),
+    [matchableItems]
+  );
+  const incomingItems = useMemo(
+    () =>
+      matchableItems
+        .filter((i) => i.amount > 0)
+        .sort((a, b) => b.date.localeCompare(a.date)),
+    [matchableItems]
+  );
+  const selectedOutgoingItem = outgoingItems.find(
+    (i) => itemKey(i) === selectedOutgoingKey
+  );
+  const selectedIncomingItem = incomingItems.find(
+    (i) => itemKey(i) === selectedIncomingKey
+  );
+
+  function confirmMatch() {
+    if (!selectedOutgoingItem || !selectedIncomingItem) return;
+    setMatchSaving(true);
+    setMatchMsg("");
+    const record = {
+      id: String(Date.now() + Math.random()),
+      kind: "match",
+      workerA: selectedOutgoingItem.worker,
+      dateA: selectedOutgoingItem.date,
+      descA: selectedOutgoingItem.desc,
+      amountA: selectedOutgoingItem.amount,
+      itemIdA: selectedOutgoingItem.id,
+      workerB: selectedIncomingItem.worker,
+      dateB: selectedIncomingItem.date,
+      descB: selectedIncomingItem.desc,
+      amountB: selectedIncomingItem.amount,
+      itemIdB: selectedIncomingItem.id,
+      diff: selectedIncomingItem.amount - Math.abs(selectedOutgoingItem.amount),
+      matchedAt: todayStr(),
+    };
+    supabase
+      .rpc("append_special_record", { p_key: SPECIAL_KEYS.TRANSFERS, p_record: record })
+      .then(({ error }) => {
+        if (error) {
+          setMatchMsg(t("配对失败，检查网络后重试", "Pairing failed, check your connection and retry"));
+        } else {
+          refreshSpecialData(SPECIAL_KEYS.TRANSFERS, setTransferData, emptyTransferData);
+          setSelectedOutgoingKey(null);
+          setSelectedIncomingKey(null);
+          setMatchMsg(t("配对成功", "Paired"));
+        }
+      })
+      .finally(() => setMatchSaving(false));
+  }
+
+  function unmatch(record) {
+    if (
+      !window.confirm(
+        t(
+          "确定取消这组配对？（两边各自的流水记录不会被删除，只是取消配对标记）",
+          "Cancel this pairing? (Neither side's flow entry is deleted — only the pairing link is removed.)"
+        )
+      )
+    )
+      return;
+    supabase
+      .rpc("delete_match_record", { p_key: SPECIAL_KEYS.TRANSFERS, p_record_id: record.id })
+      .then(({ error }) => {
+        if (!error) {
+          refreshSpecialData(SPECIAL_KEYS.TRANSFERS, setTransferData, emptyTransferData);
+        } else {
+          setMatchMsg(t("取消配对失败，检查网络后重试", "Failed to unpair, check your connection and retry"));
+        }
+      });
+  }
 
   async function saveDay() {
     setActualError("");
@@ -2142,6 +2274,18 @@ export default function GoldLedger() {
             <h2 className="text-sm font-medium text-stone-300 mb-3">
               {t("其他类别出货（戒指 / 链 / 牌 / 自定义）", "Other categories (rings / chains / plates / custom)")}
             </h2>
+            <label className="flex items-center gap-2 mb-3 text-sm text-stone-300 cursor-pointer w-fit">
+              <input
+                type="checkbox"
+                checked={shipIsCustomOrder}
+                onChange={(e) => setShipIsCustomOrder(e.target.checked)}
+                className="w-4 h-4 accent-amber-500"
+              />
+              {t(
+                "这是订工（类别前面会加上「订工-」）",
+                'This is a custom order (category will be prefixed with "订工-")'
+              )}
+            </label>
             <div className="grid grid-cols-1 md:grid-cols-[130px_1fr_120px_auto] gap-2 mb-2">
               <select
                 value={shipCategory}
@@ -2594,6 +2738,291 @@ export default function GoldLedger() {
 
       {view === "transfers" && (
         <>
+          <div className="flex gap-2 mb-6">
+            <button
+              onClick={() => setTransferMode("match")}
+              className={
+                "flex-1 md:flex-none px-4 py-2.5 md:py-2 rounded-lg text-sm font-medium transition-colors " +
+                (transferMode === "match"
+                  ? "bg-amber-500 text-stone-950"
+                  : "bg-stone-900 text-stone-300 hover:bg-stone-800 border border-stone-800")
+              }
+            >
+              {t("自由配对（推荐）", "Free pairing (recommended)")}
+            </button>
+            <button
+              onClick={() => setTransferMode("confirm")}
+              className={
+                "flex-1 md:flex-none px-4 py-2.5 md:py-2 rounded-lg text-sm font-medium transition-colors " +
+                (transferMode === "confirm"
+                  ? "bg-amber-500 text-stone-950"
+                  : "bg-stone-900 text-stone-300 hover:bg-stone-800 border border-stone-800")
+              }
+            >
+              {t("双重确认（旧方式）", "Double confirm (old way)")}
+            </button>
+          </div>
+
+          {transferMode === "match" && (
+            <>
+              <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
+                <p className="text-xs text-stone-500">
+                  {t(
+                    '双方各自照平常那样，在"对账"页自己的今日流水里记好出/入的重量、去向选对方就行——不用等对方、不用先讲好。填完之后来这里把两边的记录配对起来看差异。',
+                    'Each side just logs their own weight as usual, in their own daily flow on the Reconcile tab — set the destination to the other party. No need to wait for or coordinate with each other. Come back here afterward to pair the two entries and see the difference.'
+                  )}
+                </p>
+              </div>
+
+              {selectedOutgoingItem && selectedIncomingItem && (
+                <div className="bg-amber-500/5 border border-amber-500/30 rounded-xl p-4 mb-6">
+                  <p className="text-sm text-stone-300 mb-2">
+                    {selectedOutgoingItem.worker} → {selectedIncomingItem.worker}
+                  </p>
+                  <div className="grid grid-cols-3 gap-3 mb-3">
+                    <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
+                      <p className="text-xs text-stone-500 mb-1">{t("送出", "Sent")}</p>
+                      <p className="font-mono tabular-nums text-stone-200">
+                        {fmtPlain(Math.abs(selectedOutgoingItem.amount))} g
+                      </p>
+                    </div>
+                    <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
+                      <p className="text-xs text-stone-500 mb-1">{t("接收", "Received")}</p>
+                      <p className="font-mono tabular-nums text-stone-200">
+                        {fmtPlain(selectedIncomingItem.amount)} g
+                      </p>
+                    </div>
+                    <div
+                      className={
+                        "border rounded-lg p-3 " +
+                        (Math.abs(
+                          selectedIncomingItem.amount - Math.abs(selectedOutgoingItem.amount)
+                        ) > (transferData.threshold ?? 0.05)
+                          ? "bg-rose-500/10 border-rose-500/40"
+                          : "bg-emerald-500/10 border-emerald-500/40")
+                      }
+                    >
+                      <p className="text-xs text-stone-500 mb-1">{t("差异", "Diff")}</p>
+                      <p
+                        className={
+                          "font-mono tabular-nums " +
+                          (Math.abs(
+                            selectedIncomingItem.amount - Math.abs(selectedOutgoingItem.amount)
+                          ) > (transferData.threshold ?? 0.05)
+                            ? "text-rose-400"
+                            : "text-emerald-400")
+                        }
+                      >
+                        {fmt(selectedIncomingItem.amount - Math.abs(selectedOutgoingItem.amount))} g
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={confirmMatch}
+                      disabled={matchSaving}
+                      className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-stone-950 font-medium rounded-lg px-4 py-2 text-sm"
+                    >
+                      {matchSaving ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <CheckCircle2 className="w-4 h-4" />
+                      )}
+                      {t("确认配对", "Confirm pairing")}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSelectedOutgoingKey(null);
+                        setSelectedIncomingKey(null);
+                      }}
+                      className="text-xs px-3 py-2 rounded-lg text-stone-500 hover:text-stone-300"
+                    >
+                      {t("取消选择", "Clear selection")}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {matchMsg && <p className="text-xs text-stone-400 mb-4">{matchMsg}</p>}
+
+              <div className="grid md:grid-cols-2 gap-4 mb-6">
+                <div className="bg-stone-900 border border-stone-800 rounded-xl p-4">
+                  <h2 className="text-sm font-medium text-stone-300 mb-3">
+                    {t(`待配对 · 送出（${outgoingItems.length}）`, `Unpaired · Sent (${outgoingItems.length})`)}
+                  </h2>
+                  {outgoingItems.length === 0 ? (
+                    <p className="text-sm text-stone-600 py-4 text-center">
+                      {t("没有待配对的送出记录", "No unpaired outgoing entries")}
+                    </p>
+                  ) : (
+                    <div className="space-y-2 max-h-96 overflow-y-auto">
+                      {outgoingItems.map((item) => {
+                        const key = itemKey(item);
+                        const selected = key === selectedOutgoingKey;
+                        return (
+                          <button
+                            key={key}
+                            onClick={() => setSelectedOutgoingKey(selected ? null : key)}
+                            className={
+                              "w-full text-left rounded-lg p-3 border transition-colors " +
+                              (selected
+                                ? "bg-amber-500/10 border-amber-500/50"
+                                : "bg-stone-950 border-stone-800 hover:border-stone-700")
+                            }
+                          >
+                            <div className="flex items-center justify-between text-sm">
+                              <span className="text-stone-300">{item.worker}</span>
+                              <span className="font-mono tabular-nums text-rose-400">
+                                {fmt(item.amount)} g
+                              </span>
+                            </div>
+                            <p className="text-xs text-stone-500 mt-0.5">
+                              {item.date} · {item.desc} → {item.dest}
+                            </p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-stone-900 border border-stone-800 rounded-xl p-4">
+                  <h2 className="text-sm font-medium text-stone-300 mb-3">
+                    {t(`待配对 · 接收（${incomingItems.length}）`, `Unpaired · Received (${incomingItems.length})`)}
+                  </h2>
+                  {incomingItems.length === 0 ? (
+                    <p className="text-sm text-stone-600 py-4 text-center">
+                      {t("没有待配对的接收记录", "No unpaired incoming entries")}
+                    </p>
+                  ) : (
+                    <div className="space-y-2 max-h-96 overflow-y-auto">
+                      {incomingItems.map((item) => {
+                        const key = itemKey(item);
+                        const selected = key === selectedIncomingKey;
+                        return (
+                          <button
+                            key={key}
+                            onClick={() => setSelectedIncomingKey(selected ? null : key)}
+                            className={
+                              "w-full text-left rounded-lg p-3 border transition-colors " +
+                              (selected
+                                ? "bg-amber-500/10 border-amber-500/50"
+                                : "bg-stone-950 border-stone-800 hover:border-stone-700")
+                            }
+                          >
+                            <div className="flex items-center justify-between text-sm">
+                              <span className="text-stone-300">{item.worker}</span>
+                              <span className="font-mono tabular-nums text-emerald-400">
+                                {fmt(item.amount)} g
+                              </span>
+                            </div>
+                            <p className="text-xs text-stone-500 mt-0.5">
+                              {item.date} · {item.desc} ← {item.dest}
+                            </p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
+                <label className="block text-xs text-stone-500 mb-1">
+                  {t("误差标红阈值（超过这个数就标红，克）", "Diff alert threshold (flagged above this, g)")}
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={thresholdDraft}
+                    onChange={(e) => setThresholdDraft(e.target.value)}
+                    className="w-32 bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm font-mono text-stone-100 focus:outline-none focus:border-amber-500"
+                  />
+                  <button
+                    onClick={saveThreshold}
+                    className="text-xs px-3 py-2 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
+                  >
+                    {t("更新阈值", "Update threshold")}
+                  </button>
+                  <span className="text-xs text-stone-600">
+                    {t("当前生效：", "Currently:")} {fmtPlain(transferData.threshold ?? 0.05)} g
+                  </span>
+                </div>
+              </div>
+
+              <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5">
+                <h2 className="text-sm font-medium text-stone-300 mb-3 flex items-center gap-2">
+                  <ArrowLeftRight className="w-4 h-4" />
+                  {t(`已配对（${matchRecords.length}）`, `Paired (${matchRecords.length})`)}
+                </h2>
+                {matchRecords.length === 0 ? (
+                  <p className="text-sm text-stone-600 py-4 text-center">
+                    {t("还没有配对记录", "No pairings yet")}
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-xs text-stone-500 border-b border-stone-800">
+                          <th className="text-left py-2 font-normal">{t("送出→接收", "Sent → Received")}</th>
+                          <th className="text-right py-2 font-normal">{t("送出", "Sent")}</th>
+                          <th className="text-right py-2 font-normal">{t("接收", "Received")}</th>
+                          <th className="text-right py-2 font-normal">{t("差异", "Diff")}</th>
+                          <th className="text-right py-2 font-normal"></th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-stone-800">
+                        {[...matchRecords]
+                          .sort((a, b) => (b.matchedAt || "").localeCompare(a.matchedAt || ""))
+                          .map((r) => {
+                            const over = Math.abs(r.diff) > (transferData.threshold ?? 0.05);
+                            return (
+                              <tr key={r.id}>
+                                <td className="py-2 text-stone-400">
+                                  {r.workerA} → {r.workerB}
+                                  <div className="text-xs text-stone-600">
+                                    {r.dateA} → {r.dateB}
+                                  </div>
+                                </td>
+                                <td className="py-2 text-right font-mono tabular-nums text-stone-300">
+                                  {fmtPlain(Math.abs(r.amountA))}
+                                </td>
+                                <td className="py-2 text-right font-mono tabular-nums text-stone-300">
+                                  {fmtPlain(r.amountB)}
+                                </td>
+                                <td
+                                  className={
+                                    "py-2 text-right font-mono tabular-nums " +
+                                    (over ? "text-rose-400" : "text-emerald-400")
+                                  }
+                                >
+                                  <span className="inline-flex items-center gap-1">
+                                    {over && <AlertTriangle className="w-3 h-3" />}
+                                    {fmt(r.diff)}
+                                  </span>
+                                </td>
+                                <td className="py-2 text-right">
+                                  <button
+                                    onClick={() => unmatch(r)}
+                                    className="text-stone-600 hover:text-rose-400 p-2 -m-2 rounded-lg active:bg-stone-800"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          {transferMode === "confirm" && (
+          <>
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
             <button
               onClick={() => setShowQuickTransfer((v) => !v)}
@@ -3097,6 +3526,8 @@ export default function GoldLedger() {
               </div>
             )}
           </div>
+          </>
+          )}
         </>
       )}
 
