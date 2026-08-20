@@ -19,9 +19,11 @@ import {
   Truck,
   ArrowLeftRight,
   Users,
+  LayoutDashboard,
 } from "lucide-react";
 
 const WORKERS = ["JJ", "PD Lv2", "PD Lv1", "倒模", "Lv1车花", "Lv1倒模"];
+const SUMMARY_WORKERS = ["JJ", "PD Lv1", "PD Lv2", "Lv1车花"];
 const OTHER_DESTINATIONS = [
   "老板",
   "现货",
@@ -784,6 +786,72 @@ export default function GoldLedger() {
     }
     setDeletingUserId(null);
   }
+
+  // ---- 总览：JJ+PD Lv1+PD Lv2+Lv1车花 汇总 ----
+  const summaryLatest = useMemo(() => {
+    const rows = SUMMARY_WORKERS.map((w) => {
+      const wd = data[w] || emptyWorkerData();
+      const lastRecord = wd.history.length ? wd.history[wd.history.length - 1] : null;
+      return {
+        worker: w,
+        actual: wd.lastWeight,
+        expected: lastRecord ? lastRecord.expected : null,
+        loss: lastRecord ? lastRecord.loss : null,
+        date: lastRecord ? lastRecord.date : null,
+      };
+    });
+    const sum = (key) => {
+      const vals = rows.map((r) => r[key]).filter((v) => v !== null && v !== undefined);
+      return vals.length ? vals.reduce((s, v) => s + v, 0) : null;
+    };
+    return {
+      rows,
+      totalActual: sum("actual"),
+      totalExpected: sum("expected"),
+      totalLoss: sum("loss"),
+    };
+  }, [data]);
+
+  const summaryHistory = useMemo(() => {
+    const byDate = new Map();
+    for (const w of SUMMARY_WORKERS) {
+      const wd = data[w] || emptyWorkerData();
+      for (const r of wd.history) {
+        if (!byDate.has(r.date)) byDate.set(r.date, {});
+        byDate.get(r.date)[w] = r;
+      }
+    }
+    const dates = Array.from(byDate.keys()).sort((a, b) => b.localeCompare(a));
+    return dates.slice(0, 30).map((date) => {
+      const byWorker = byDate.get(date);
+      const complete = SUMMARY_WORKERS.every((w) => byWorker[w]);
+      let totalActual = 0;
+      let anyActual = false;
+      for (const w of SUMMARY_WORKERS) {
+        if (byWorker[w]) {
+          totalActual += byWorker[w].actual;
+          anyActual = true;
+        }
+      }
+      let totalExpected = null;
+      let totalLoss = null;
+      if (complete) {
+        totalExpected = SUMMARY_WORKERS.reduce(
+          (s, w) => s + (byWorker[w].expected ?? 0),
+          0
+        );
+        totalLoss = SUMMARY_WORKERS.reduce((s, w) => s + (byWorker[w].loss ?? 0), 0);
+      }
+      return {
+        date,
+        byWorker,
+        complete,
+        totalActual: anyActual ? totalActual : null,
+        totalExpected,
+        totalLoss,
+      };
+    });
+  }, [data]);
 
   const pendingShipments = useMemo(
     () =>
@@ -1566,6 +1634,7 @@ export default function GoldLedger() {
 
       <div className="flex gap-2 mb-6 overflow-x-auto -mx-5 px-5 md:mx-0 md:px-0 md:flex-wrap [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {[
+          { key: "summary", label: t("总览", "Overview"), icon: LayoutDashboard },
           { key: "workers", label: t("对账", "Reconcile"), icon: Scale },
           { key: "shipments", label: t("出货记录", "Shipments"), icon: Truck },
           { key: "transfers", label: t("转手核对", "Transfers"), icon: ArrowLeftRight },
@@ -1586,6 +1655,179 @@ export default function GoldLedger() {
           </button>
         ))}
       </div>
+
+      {view === "summary" && (
+        <>
+          <p className="text-xs text-stone-500 mb-4">
+            {t(
+              `汇总 ${SUMMARY_WORKERS.join("、")} 这几个worker的实重、要有、损耗`,
+              `Combined actual, expected, and loss across ${SUMMARY_WORKERS.join(", ")}`
+            )}
+          </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <div className="bg-stone-900 border border-stone-800 rounded-xl p-4">
+              <p className="text-xs text-stone-500 mb-1">{t("合计实重", "Total actual")}</p>
+              <p className="text-xl font-mono tabular-nums text-stone-100">
+                {summaryLatest.totalActual === null ? "-" : fmtPlain(summaryLatest.totalActual) + " g"}
+              </p>
+            </div>
+            <div className="bg-stone-900 border border-stone-800 rounded-xl p-4">
+              <p className="text-xs text-stone-500 mb-1">{t("合计要有", "Total expected")}</p>
+              <p className="text-xl font-mono tabular-nums text-stone-100">
+                {summaryLatest.totalExpected === null ? "-" : fmtPlain(summaryLatest.totalExpected) + " g"}
+              </p>
+            </div>
+            <div className="bg-stone-900 border border-stone-800 rounded-xl p-4">
+              <p className="text-xs text-stone-500 mb-1">{t("合计损耗", "Total loss")}</p>
+              <p
+                className={
+                  "text-xl font-mono tabular-nums " +
+                  (summaryLatest.totalLoss !== null && Math.abs(summaryLatest.totalLoss) > LOSS_THRESHOLD
+                    ? "text-rose-400"
+                    : "text-stone-100")
+                }
+              >
+                {summaryLatest.totalLoss === null ? "-" : fmt(summaryLatest.totalLoss) + " g"}
+              </p>
+            </div>
+          </div>
+
+          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
+            <h2 className="text-sm font-medium text-stone-300 mb-3">
+              {t("各worker最新一天", "Each worker's latest day")}
+            </h2>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs text-stone-500 border-b border-stone-800">
+                    <th className="text-left py-2 font-normal">Worker</th>
+                    <th className="text-left py-2 font-normal">{t("日期", "Date")}</th>
+                    <th className="text-right py-2 font-normal">{t("要有", "Expected")}</th>
+                    <th className="text-right py-2 font-normal">{t("实重", "Actual")}</th>
+                    <th className="text-right py-2 font-normal">{t("损耗", "Loss")}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-stone-800">
+                  {summaryLatest.rows.map((r) => {
+                    const over = r.loss !== null && Math.abs(r.loss) > LOSS_THRESHOLD;
+                    return (
+                      <tr key={r.worker}>
+                        <td className="py-2 text-stone-300">{r.worker}</td>
+                        <td className="py-2 text-stone-500 text-xs">{r.date || "-"}</td>
+                        <td className="py-2 text-right font-mono tabular-nums text-stone-300">
+                          {r.expected === null ? "-" : fmtPlain(r.expected)}
+                        </td>
+                        <td className="py-2 text-right font-mono tabular-nums text-stone-100">
+                          {r.actual === null ? "-" : fmtPlain(r.actual)}
+                        </td>
+                        <td
+                          className={
+                            "py-2 text-right font-mono tabular-nums " +
+                            (r.loss === null ? "text-stone-600" : over ? "text-rose-400" : "text-emerald-400")
+                          }
+                        >
+                          {r.loss === null ? "-" : fmt(r.loss)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  <tr className="border-t border-stone-700">
+                    <td className="py-2 text-stone-200 font-medium" colSpan={2}>
+                      {t("合计", "Total")}
+                    </td>
+                    <td className="py-2 text-right font-mono tabular-nums text-stone-200 font-medium">
+                      {summaryLatest.totalExpected === null ? "-" : fmtPlain(summaryLatest.totalExpected)}
+                    </td>
+                    <td className="py-2 text-right font-mono tabular-nums text-stone-200 font-medium">
+                      {summaryLatest.totalActual === null ? "-" : fmtPlain(summaryLatest.totalActual)}
+                    </td>
+                    <td className="py-2 text-right font-mono tabular-nums text-stone-200 font-medium">
+                      {summaryLatest.totalLoss === null ? "-" : fmt(summaryLatest.totalLoss)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5">
+            <h2 className="text-sm font-medium text-stone-300 mb-3 flex items-center gap-2">
+              <History className="w-4 h-4" />
+              {t("历史合并记录（按日期，最近30天）", "Combined history (by date, last 30 days)")}
+            </h2>
+            {summaryHistory.length === 0 ? (
+              <p className="text-sm text-stone-600 py-4 text-center">
+                {t("还没有历史记录", "No history yet")}
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-xs text-stone-500 border-b border-stone-800">
+                      <th className="text-left py-2 font-normal">{t("日期", "Date")}</th>
+                      {SUMMARY_WORKERS.map((w) => (
+                        <th key={w} className="text-right py-2 font-normal">
+                          {w}
+                        </th>
+                      ))}
+                      <th className="text-right py-2 font-normal">{t("合计实重", "Total actual")}</th>
+                      <th className="text-right py-2 font-normal">{t("合计损耗", "Total loss")}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-800">
+                    {summaryHistory.map((row) => {
+                      const over =
+                        row.totalLoss !== null && Math.abs(row.totalLoss) > LOSS_THRESHOLD;
+                      return (
+                        <tr key={row.date}>
+                          <td className="py-2 text-stone-400">
+                            {row.date}
+                            {!row.complete && (
+                              <span className="text-stone-600" title={t("不是4个worker都有这天的记录", "Not all 4 workers have a record this day")}>
+                                {" "}*
+                              </span>
+                            )}
+                          </td>
+                          {SUMMARY_WORKERS.map((w) => (
+                            <td
+                              key={w}
+                              className="py-2 text-right font-mono tabular-nums text-stone-300"
+                            >
+                              {row.byWorker[w] ? fmtPlain(row.byWorker[w].actual) : "-"}
+                            </td>
+                          ))}
+                          <td className="py-2 text-right font-mono tabular-nums text-stone-100">
+                            {row.totalActual === null ? "-" : fmtPlain(row.totalActual)}
+                          </td>
+                          <td
+                            className={
+                              "py-2 text-right font-mono tabular-nums " +
+                              (row.totalLoss === null
+                                ? "text-stone-600"
+                                : over
+                                ? "text-rose-400"
+                                : "text-emerald-400")
+                            }
+                          >
+                            {row.totalLoss === null ? "-" : fmt(row.totalLoss)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p className="text-xs text-stone-600 mt-3">
+              {t(
+                "* 标记的日期不是4个worker都有记录，合计要有/损耗留空（避免算错）；合计实重只加有记录的那几个。",
+                "* marked dates don't have all 4 workers recorded; total expected/loss is left blank to avoid a misleading number. Total actual only adds whichever workers reported."
+              )}
+            </p>
+          </div>
+        </>
+      )}
 
       {view === "workers" && (
         <>
