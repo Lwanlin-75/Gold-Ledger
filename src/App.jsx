@@ -250,8 +250,8 @@ export default function GoldLedger() {
   const [thresholdDraft, setThresholdDraft] = useState("0.05");
   // 转手核对：自由配对模式（不需要双重确认）
   const [transferMode, setTransferMode] = useState("match");
-  const [selectedOutgoingKey, setSelectedOutgoingKey] = useState(null);
-  const [selectedIncomingKey, setSelectedIncomingKey] = useState(null);
+  const [selectedOutgoingKeys, setSelectedOutgoingKeys] = useState(() => new Set());
+  const [selectedIncomingKeys, setSelectedIncomingKeys] = useState(() => new Set());
   const [matchSaving, setMatchSaving] = useState(false);
   const [matchMsg, setMatchMsg] = useState("");
 
@@ -841,11 +841,34 @@ export default function GoldLedger() {
     () => transferData.history.filter((r) => r.kind === "match"),
     [transferData.history]
   );
+  // 兼容旧格式（单笔配对）和新格式（多笔配对）
+  function getOutgoingList(r) {
+    if (r.outgoing) return r.outgoing;
+    if (r.itemIdA) {
+      return [{ worker: r.workerA, date: r.dateA, desc: r.descA, amount: r.amountA, itemId: r.itemIdA }];
+    }
+    return [];
+  }
+  function getIncomingList(r) {
+    if (r.incoming) return r.incoming;
+    if (r.itemIdB) {
+      return [{ worker: r.workerB, date: r.dateB, desc: r.descB, amount: r.amountB, itemId: r.itemIdB }];
+    }
+    return [];
+  }
+  function getTotalOut(r) {
+    return r.totalOut !== undefined ? r.totalOut : Math.abs(r.amountA || 0);
+  }
+  function getTotalIn(r) {
+    return r.totalIn !== undefined ? r.totalIn : r.amountB || 0;
+  }
   const matchedItemIds = useMemo(() => {
     const s = new Set();
     for (const r of matchRecords) {
-      s.add(r.itemIdA);
-      s.add(r.itemIdB);
+      if (r.outgoing) r.outgoing.forEach((i) => s.add(i.itemId));
+      else if (r.itemIdA) s.add(r.itemIdA);
+      if (r.incoming) r.incoming.forEach((i) => s.add(i.itemId));
+      else if (r.itemIdB) s.add(r.itemIdB);
     }
     return s;
   }, [matchRecords]);
@@ -882,31 +905,59 @@ export default function GoldLedger() {
         .sort((a, b) => b.date.localeCompare(a.date)),
     [matchableItems]
   );
-  const selectedOutgoingItem = outgoingItems.find(
-    (i) => itemKey(i) === selectedOutgoingKey
+  function toggleOutgoing(key) {
+    setSelectedOutgoingKeys((s) => {
+      const next = new Set(s);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+  function toggleIncoming(key) {
+    setSelectedIncomingKeys((s) => {
+      const next = new Set(s);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  const selectedOutgoingList = useMemo(
+    () => outgoingItems.filter((i) => selectedOutgoingKeys.has(itemKey(i))),
+    [outgoingItems, selectedOutgoingKeys]
   );
-  const selectedIncomingItem = incomingItems.find(
-    (i) => itemKey(i) === selectedIncomingKey
+  const selectedIncomingList = useMemo(
+    () => incomingItems.filter((i) => selectedIncomingKeys.has(itemKey(i))),
+    [incomingItems, selectedIncomingKeys]
   );
+  const selTotalOut = selectedOutgoingList.reduce((s, i) => s + Math.abs(i.amount), 0);
+  const selTotalIn = selectedIncomingList.reduce((s, i) => s + i.amount, 0);
+  const selDiff = selTotalIn - selTotalOut;
 
   function confirmMatch() {
-    if (!selectedOutgoingItem || !selectedIncomingItem) return;
+    if (selectedOutgoingList.length === 0 || selectedIncomingList.length === 0) return;
     setMatchSaving(true);
     setMatchMsg("");
     const record = {
       id: String(Date.now() + Math.random()),
       kind: "match",
-      workerA: selectedOutgoingItem.worker,
-      dateA: selectedOutgoingItem.date,
-      descA: selectedOutgoingItem.desc,
-      amountA: selectedOutgoingItem.amount,
-      itemIdA: selectedOutgoingItem.id,
-      workerB: selectedIncomingItem.worker,
-      dateB: selectedIncomingItem.date,
-      descB: selectedIncomingItem.desc,
-      amountB: selectedIncomingItem.amount,
-      itemIdB: selectedIncomingItem.id,
-      diff: selectedIncomingItem.amount - Math.abs(selectedOutgoingItem.amount),
+      outgoing: selectedOutgoingList.map((i) => ({
+        worker: i.worker,
+        date: i.date,
+        desc: i.desc,
+        amount: i.amount,
+        itemId: i.id,
+      })),
+      incoming: selectedIncomingList.map((i) => ({
+        worker: i.worker,
+        date: i.date,
+        desc: i.desc,
+        amount: i.amount,
+        itemId: i.id,
+      })),
+      totalOut: selTotalOut,
+      totalIn: selTotalIn,
+      diff: selDiff,
       matchedAt: todayStr(),
     };
     supabase
@@ -916,8 +967,8 @@ export default function GoldLedger() {
           setMatchMsg(t("配对失败，检查网络后重试", "Pairing failed, check your connection and retry"));
         } else {
           refreshSpecialData(SPECIAL_KEYS.TRANSFERS, setTransferData, emptyTransferData);
-          setSelectedOutgoingKey(null);
-          setSelectedIncomingKey(null);
+          setSelectedOutgoingKeys(new Set());
+          setSelectedIncomingKeys(new Set());
           setMatchMsg(t("配对成功", "Paired"));
         }
       })
@@ -2901,30 +2952,41 @@ export default function GoldLedger() {
                 </p>
               </div>
 
-              {selectedOutgoingItem && selectedIncomingItem && (
+              {(selectedOutgoingList.length > 0 || selectedIncomingList.length > 0) && (
                 <div className="bg-amber-500/5 border border-amber-500/30 rounded-xl p-4 mb-6">
                   <p className="text-sm text-stone-300 mb-2">
-                    {selectedOutgoingItem.worker} → {selectedIncomingItem.worker}
+                    {t(
+                      `已选 送出 ${selectedOutgoingList.length} 笔 → 接收 ${selectedIncomingList.length} 笔`,
+                      `Selected: ${selectedOutgoingList.length} sent → ${selectedIncomingList.length} received`
+                    )}
                   </p>
+                  <div className="space-y-1 mb-3">
+                    {selectedOutgoingList.map((i) => (
+                      <p key={i.id} className="text-xs text-stone-500">
+                        <span className="text-rose-400">↑</span> {i.worker} · {i.date} · {i.desc} ·{" "}
+                        {fmtPlain(Math.abs(i.amount))}g
+                      </p>
+                    ))}
+                    {selectedIncomingList.map((i) => (
+                      <p key={i.id} className="text-xs text-stone-500">
+                        <span className="text-emerald-400">↓</span> {i.worker} · {i.date} · {i.desc} ·{" "}
+                        {fmtPlain(i.amount)}g
+                      </p>
+                    ))}
+                  </div>
                   <div className="grid grid-cols-3 gap-3 mb-3">
                     <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
-                      <p className="text-xs text-stone-500 mb-1">{t("送出", "Sent")}</p>
-                      <p className="font-mono tabular-nums text-stone-200">
-                        {fmtPlain(Math.abs(selectedOutgoingItem.amount))} g
-                      </p>
+                      <p className="text-xs text-stone-500 mb-1">{t("送出合计", "Total sent")}</p>
+                      <p className="font-mono tabular-nums text-stone-200">{fmtPlain(selTotalOut)} g</p>
                     </div>
                     <div className="bg-stone-950 border border-stone-800 rounded-lg p-3">
-                      <p className="text-xs text-stone-500 mb-1">{t("接收", "Received")}</p>
-                      <p className="font-mono tabular-nums text-stone-200">
-                        {fmtPlain(selectedIncomingItem.amount)} g
-                      </p>
+                      <p className="text-xs text-stone-500 mb-1">{t("接收合计", "Total received")}</p>
+                      <p className="font-mono tabular-nums text-stone-200">{fmtPlain(selTotalIn)} g</p>
                     </div>
                     <div
                       className={
                         "border rounded-lg p-3 " +
-                        (Math.abs(
-                          selectedIncomingItem.amount - Math.abs(selectedOutgoingItem.amount)
-                        ) > (transferData.threshold ?? 0.05)
+                        (Math.abs(selDiff) > (transferData.threshold ?? 0.05)
                           ? "bg-rose-500/10 border-rose-500/40"
                           : "bg-emerald-500/10 border-emerald-500/40")
                       }
@@ -2933,21 +2995,21 @@ export default function GoldLedger() {
                       <p
                         className={
                           "font-mono tabular-nums " +
-                          (Math.abs(
-                            selectedIncomingItem.amount - Math.abs(selectedOutgoingItem.amount)
-                          ) > (transferData.threshold ?? 0.05)
+                          (Math.abs(selDiff) > (transferData.threshold ?? 0.05)
                             ? "text-rose-400"
                             : "text-emerald-400")
                         }
                       >
-                        {fmt(selectedIncomingItem.amount - Math.abs(selectedOutgoingItem.amount))} g
+                        {fmt(selDiff)} g
                       </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
                       onClick={confirmMatch}
-                      disabled={matchSaving}
+                      disabled={
+                        matchSaving || selectedOutgoingList.length === 0 || selectedIncomingList.length === 0
+                      }
                       className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-stone-950 font-medium rounded-lg px-4 py-2 text-sm"
                     >
                       {matchSaving ? (
@@ -2959,8 +3021,8 @@ export default function GoldLedger() {
                     </button>
                     <button
                       onClick={() => {
-                        setSelectedOutgoingKey(null);
-                        setSelectedIncomingKey(null);
+                        setSelectedOutgoingKeys(new Set());
+                        setSelectedIncomingKeys(new Set());
                       }}
                       className="text-xs px-3 py-2 rounded-lg text-stone-500 hover:text-stone-300"
                     >
@@ -2984,7 +3046,7 @@ export default function GoldLedger() {
                     <div className="space-y-2 max-h-96 overflow-y-auto">
                       {outgoingItems.map((item) => {
                         const key = itemKey(item);
-                        const selected = key === selectedOutgoingKey;
+                        const selected = selectedOutgoingKeys.has(key);
                         return (
                           <div
                             key={key}
@@ -2996,18 +3058,30 @@ export default function GoldLedger() {
                             }
                           >
                             <button
-                              onClick={() => setSelectedOutgoingKey(selected ? null : key)}
-                              className="flex-1 min-w-0 text-left p-3"
+                              onClick={() => toggleOutgoing(key)}
+                              className="flex items-center gap-3 flex-1 min-w-0 text-left p-3"
                             >
-                              <div className="flex items-center justify-between text-sm">
-                                <span className="text-stone-300">{item.worker}</span>
-                                <span className="font-mono tabular-nums text-rose-400">
-                                  {fmt(item.amount)} g
-                                </span>
-                              </div>
-                              <p className="text-xs text-stone-500 mt-0.5 truncate">
-                                {item.date} · {item.desc} → {item.dest}
-                              </p>
+                              <span
+                                className={
+                                  "shrink-0 w-4 h-4 rounded border flex items-center justify-center " +
+                                  (selected
+                                    ? "bg-amber-500 border-amber-500"
+                                    : "border-stone-600")
+                                }
+                              >
+                                {selected && <CheckCircle2 className="w-3.5 h-3.5 text-stone-950" />}
+                              </span>
+                              <span className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between text-sm">
+                                  <span className="text-stone-300">{item.worker}</span>
+                                  <span className="font-mono tabular-nums text-rose-400">
+                                    {fmt(item.amount)} g
+                                  </span>
+                                </div>
+                                <p className="text-xs text-stone-500 mt-0.5 truncate">
+                                  {item.date} · {item.desc} → {item.dest}
+                                </p>
+                              </span>
                             </button>
                             <button
                               onClick={() => deleteUnmatchedItem(item)}
@@ -3035,7 +3109,7 @@ export default function GoldLedger() {
                     <div className="space-y-2 max-h-96 overflow-y-auto">
                       {incomingItems.map((item) => {
                         const key = itemKey(item);
-                        const selected = key === selectedIncomingKey;
+                        const selected = selectedIncomingKeys.has(key);
                         return (
                           <div
                             key={key}
@@ -3047,18 +3121,30 @@ export default function GoldLedger() {
                             }
                           >
                             <button
-                              onClick={() => setSelectedIncomingKey(selected ? null : key)}
-                              className="flex-1 min-w-0 text-left p-3"
+                              onClick={() => toggleIncoming(key)}
+                              className="flex items-center gap-3 flex-1 min-w-0 text-left p-3"
                             >
-                              <div className="flex items-center justify-between text-sm">
-                                <span className="text-stone-300">{item.worker}</span>
-                                <span className="font-mono tabular-nums text-emerald-400">
-                                  {fmt(item.amount)} g
-                                </span>
-                              </div>
-                              <p className="text-xs text-stone-500 mt-0.5 truncate">
-                                {item.date} · {item.desc} ← {item.dest}
-                              </p>
+                              <span
+                                className={
+                                  "shrink-0 w-4 h-4 rounded border flex items-center justify-center " +
+                                  (selected
+                                    ? "bg-amber-500 border-amber-500"
+                                    : "border-stone-600")
+                                }
+                              >
+                                {selected && <CheckCircle2 className="w-3.5 h-3.5 text-stone-950" />}
+                              </span>
+                              <span className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between text-sm">
+                                  <span className="text-stone-300">{item.worker}</span>
+                                  <span className="font-mono tabular-nums text-emerald-400">
+                                    {fmt(item.amount)} g
+                                  </span>
+                                </div>
+                                <p className="text-xs text-stone-500 mt-0.5 truncate">
+                                  {item.date} · {item.desc} ← {item.dest}
+                                </p>
+                              </span>
                             </button>
                             <button
                               onClick={() => deleteUnmatchedItem(item)}
@@ -3110,60 +3196,68 @@ export default function GoldLedger() {
                     {t("还没有配对记录", "No pairings yet")}
                   </p>
                 ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-xs text-stone-500 border-b border-stone-800">
-                          <th className="text-left py-2 font-normal">{t("送出→接收", "Sent → Received")}</th>
-                          <th className="text-right py-2 font-normal">{t("送出", "Sent")}</th>
-                          <th className="text-right py-2 font-normal">{t("接收", "Received")}</th>
-                          <th className="text-right py-2 font-normal">{t("差异", "Diff")}</th>
-                          <th className="text-right py-2 font-normal"></th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-stone-800">
-                        {[...matchRecords]
-                          .sort((a, b) => (b.matchedAt || "").localeCompare(a.matchedAt || ""))
-                          .map((r) => {
-                            const over = Math.abs(r.diff) > (transferData.threshold ?? 0.05);
-                            return (
-                              <tr key={r.id}>
-                                <td className="py-2 text-stone-400">
-                                  {r.workerA} → {r.workerB}
-                                  <div className="text-xs text-stone-600">
-                                    {r.dateA} → {r.dateB}
-                                  </div>
-                                </td>
-                                <td className="py-2 text-right font-mono tabular-nums text-stone-300">
-                                  {fmtPlain(Math.abs(r.amountA))}
-                                </td>
-                                <td className="py-2 text-right font-mono tabular-nums text-stone-300">
-                                  {fmtPlain(r.amountB)}
-                                </td>
-                                <td
-                                  className={
-                                    "py-2 text-right font-mono tabular-nums " +
-                                    (over ? "text-rose-400" : "text-emerald-400")
-                                  }
-                                >
-                                  <span className="inline-flex items-center gap-1">
-                                    {over && <AlertTriangle className="w-3 h-3" />}
-                                    {fmt(r.diff)}
-                                  </span>
-                                </td>
-                                <td className="py-2 text-right">
-                                  <button
-                                    onClick={() => unmatch(r)}
-                                    className="text-stone-600 hover:text-rose-400 p-2 -m-2 rounded-lg active:bg-stone-800"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                      </tbody>
-                    </table>
+                  <div className="space-y-3">
+                    {[...matchRecords]
+                      .sort((a, b) => (b.matchedAt || "").localeCompare(a.matchedAt || ""))
+                      .map((r) => {
+                        const outList = getOutgoingList(r);
+                        const inList = getIncomingList(r);
+                        const totalOut = getTotalOut(r);
+                        const totalIn = getTotalIn(r);
+                        const over = Math.abs(r.diff) > (transferData.threshold ?? 0.05);
+                        return (
+                          <div
+                            key={r.id}
+                            className="bg-stone-950 border border-stone-800 rounded-lg p-3"
+                          >
+                            <div className="flex items-start justify-between gap-2 mb-2">
+                              <div className="text-xs text-stone-500 space-y-0.5 min-w-0">
+                                {outList.map((i, idx) => (
+                                  <p key={idx} className="truncate">
+                                    <span className="text-rose-400">↑</span> {i.worker} · {i.date} ·{" "}
+                                    {i.desc} · {fmtPlain(Math.abs(i.amount))}g
+                                  </p>
+                                ))}
+                                {inList.map((i, idx) => (
+                                  <p key={idx} className="truncate">
+                                    <span className="text-emerald-400">↓</span> {i.worker} · {i.date} ·{" "}
+                                    {i.desc} · {fmtPlain(i.amount)}g
+                                  </p>
+                                ))}
+                              </div>
+                              <button
+                                onClick={() => unmatch(r)}
+                                className="shrink-0 text-stone-600 hover:text-rose-400 p-2 -m-2 rounded-lg active:bg-stone-800"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                            <div className="flex items-center gap-4 text-sm">
+                              <span className="text-stone-400">
+                                {t("送出合计", "Total sent")}{" "}
+                                <span className="font-mono tabular-nums text-stone-200">
+                                  {fmtPlain(totalOut)}
+                                </span>
+                              </span>
+                              <span className="text-stone-400">
+                                {t("接收合计", "Total received")}{" "}
+                                <span className="font-mono tabular-nums text-stone-200">
+                                  {fmtPlain(totalIn)}
+                                </span>
+                              </span>
+                              <span
+                                className={
+                                  "font-mono tabular-nums inline-flex items-center gap-1 " +
+                                  (over ? "text-rose-400" : "text-emerald-400")
+                                }
+                              >
+                                {over && <AlertTriangle className="w-3 h-3" />}
+                                {t("差异", "Diff")} {fmt(r.diff)}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
                   </div>
                 )}
               </div>
