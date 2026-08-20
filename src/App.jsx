@@ -45,7 +45,7 @@ const SHIP_WORKERS = ["JJ", "PD Lv2", "Lv1车花"];
 const SHIP_TO = "PD门市";
 const SHIP_CATEGORIES = ["戒指", "链", "牌", "OTHER"];
 const DENOM_TOLERANCE = 0.03; // 克，GOLDBAR/GOLDBEAN 实重跟小计差超过这个数要二次确认
-const DENOMINATIONS = [
+const DENOMINATIONS_GOLDBAR = [
   { key: "0.10", label: "0.10", grams: 0.1 },
   { key: "0.20", label: "0.20", grams: 0.2 },
   { key: "0.50", label: "0.50", grams: 0.5 },
@@ -57,6 +57,14 @@ const DENOMINATIONS = [
   { key: "20.00", label: "20.00", grams: 20.0 },
   { key: "50.00", label: "50.00", grams: 50.0 },
   { key: "100.00", label: "100.00", grams: 100.0 },
+];
+const DENOMINATIONS_GOLDBEAN = [
+  { key: "0.10", label: "0.10", grams: 0.1 },
+  { key: "0.20", label: "0.20", grams: 0.2 },
+  { key: "0.50", label: "0.50", grams: 0.5 },
+  { key: "1.00", label: "1.00", grams: 1.0 },
+  { key: "1.50", label: "1.50", grams: 1.5 },
+  { key: "2.00", label: "2.00", grams: 2.0 },
 ];
 const TRANSFER_TYPE_PRESETS = ["掉色来回", "Lv1↔Lv2上下楼"];
 // 送出/接收时流水描述的默认建议，都可以在填的时候自己改
@@ -78,8 +86,8 @@ function suggestLabel(type, worker, direction) {
 
 const emptyShipmentData = () => ({ nextSerial: 2608081, threshold: 0.05, history: [] });
 
-function calcDenomState(qty, actualStr) {
-  const calc = denomTotal(qty);
+function calcDenomState(qty, actualStr, denomList) {
+  const calc = denomTotal(qty, denomList);
   const actual = actualStr === "" ? null : parseFloat(actualStr);
   const diff = actual !== null && !Number.isNaN(actual) ? actual - calc : null;
   const overTolerance = diff !== null && Math.abs(diff) > DENOM_TOLERANCE;
@@ -88,16 +96,17 @@ function calcDenomState(qty, actualStr) {
 }
 const emptyTransferData = () => ({ threshold: 0.05, history: [] });
 
-function denomTotal(qtyObj) {
-  return DENOMINATIONS.reduce(
+function denomTotal(qtyObj, denomList) {
+  return denomList.reduce(
     (s, d) => s + (parseFloat(qtyObj[d.key] || 0) || 0) * d.grams,
     0
   );
 }
 
 // 生成"面额g×数量"的明细字符串，例如 "5.00g×2、10.00g×1"
-function denomBreakdown(qtyObj) {
-  return DENOMINATIONS.filter((d) => parseFloat(qtyObj[d.key] || 0) > 0)
+function denomBreakdown(qtyObj, denomList) {
+  return denomList
+    .filter((d) => parseFloat(qtyObj[d.key] || 0) > 0)
     .map((d) => `${d.label}g×${qtyObj[d.key]}`)
     .join("、");
 }
@@ -377,8 +386,8 @@ export default function GoldLedger() {
     setGoldbeanConfirmed(false);
   }, [goldbeanQty, goldbeanActual]);
 
-  const goldbarState = calcDenomState(goldbarQty, goldbarActual);
-  const goldbeanState = calcDenomState(goldbeanQty, goldbeanActual);
+  const goldbarState = calcDenomState(goldbarQty, goldbarActual, DENOMINATIONS_GOLDBAR);
+  const goldbeanState = calcDenomState(goldbeanQty, goldbeanActual, DENOMINATIONS_GOLDBEAN);
 
   const cur = data[activeWorker] || emptyWorkerData();
 
@@ -568,7 +577,7 @@ export default function GoldLedger() {
         id: Date.now() + Math.random(),
         category: "GOLDBAR",
         weight: Math.round(goldbarState.finalWeight * 100) / 100,
-        breakdown: denomBreakdown(goldbarQty),
+        breakdown: denomBreakdown(goldbarQty, DENOMINATIONS_GOLDBAR),
       });
     }
     if (goldbeanState.finalWeight > 0) {
@@ -576,7 +585,7 @@ export default function GoldLedger() {
         id: Date.now() + Math.random(),
         category: "GOLDBEAN",
         weight: Math.round(goldbeanState.finalWeight * 100) / 100,
-        breakdown: denomBreakdown(goldbeanQty),
+        breakdown: denomBreakdown(goldbeanQty, DENOMINATIONS_GOLDBEAN),
       });
     }
     if (items.length === 0) {
@@ -2569,6 +2578,7 @@ export default function GoldLedger() {
               state: goldbarState,
               confirmed: goldbarConfirmed,
               setConfirmed: setGoldbarConfirmed,
+              denoms: DENOMINATIONS_GOLDBAR,
             },
             {
               label: "GOLDBEAN",
@@ -2579,6 +2589,7 @@ export default function GoldLedger() {
               state: goldbeanState,
               confirmed: goldbeanConfirmed,
               setConfirmed: setGoldbeanConfirmed,
+              denoms: DENOMINATIONS_GOLDBEAN,
             },
           ].map((g) => (
             <div
@@ -2597,7 +2608,7 @@ export default function GoldLedger() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-stone-800">
-                    {DENOMINATIONS.map((d) => (
+                    {g.denoms.map((d) => (
                       <tr key={d.key}>
                         <td className="py-1.5 text-stone-400">{d.label}</td>
                         <td className="py-1.5">
@@ -2669,10 +2680,15 @@ export default function GoldLedger() {
                 </div>
               )}
               <p className="text-xs text-stone-600 mt-2">
-                {t(
-                  `1 DINAR 按 4.25g、1/2 DINAR 按 2.125g 计算；实重跟小计差超过${DENOM_TOLERANCE}g会标红，需要点确认才能保存。`,
-                  `1 DINAR = 4.25g, 1/2 DINAR = 2.125g. A difference over ${DENOM_TOLERANCE}g between actual and subtotal is flagged and needs confirmation before saving.`
-                )}
+                {g.label === "GOLDBAR"
+                  ? t(
+                      `1 DINAR 按 4.25g、1/2 DINAR 按 2.125g 计算；实重跟小计差超过${DENOM_TOLERANCE}g会标红，需要点确认才能保存。`,
+                      `1 DINAR = 4.25g, 1/2 DINAR = 2.125g. A difference over ${DENOM_TOLERANCE}g between actual and subtotal is flagged and needs confirmation before saving.`
+                    )
+                  : t(
+                      `实重跟小计差超过${DENOM_TOLERANCE}g会标红，需要点确认才能保存。`,
+                      `A difference over ${DENOM_TOLERANCE}g between actual and subtotal is flagged and needs confirmation before saving.`
+                    )}
               </p>
             </div>
           ))}
