@@ -204,6 +204,7 @@ export default function GoldLedger() {
 
   // 详情弹窗
   const [showDetail, setShowDetail] = useState(null); // { worker, index } | null
+  const [summaryDetailRow, setSummaryDetailRow] = useState(null); // summaryHistory row | null
   const [editTransactions, setEditTransactions] = useState([]);
   const [editActual, setEditActual] = useState("");
   const [editDate, setEditDate] = useState("");
@@ -1754,7 +1755,7 @@ export default function GoldLedger() {
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5">
             <h2 className="text-sm font-medium text-stone-300 mb-3 flex items-center gap-2">
               <History className="w-4 h-4" />
-              {t("历史合并记录（按日期，最近30天）", "Combined history (by date, last 30 days)")}
+              {t("历史合并记录（按日期，最近30天，点日期看完整表格）", "Combined history (by date, last 30 days, click a date for the full table)")}
             </h2>
             {summaryHistory.length === 0 ? (
               <p className="text-sm text-stone-600 py-4 text-center">
@@ -1780,13 +1781,15 @@ export default function GoldLedger() {
                       const over =
                         row.totalLoss !== null && Math.abs(row.totalLoss) > LOSS_THRESHOLD;
                       return (
-                        <tr key={row.date}>
-                          <td className="py-2 text-stone-400">
+                        <tr
+                          key={row.date}
+                          className="hover:bg-stone-950/50 cursor-pointer"
+                          onClick={() => setSummaryDetailRow(row)}
+                        >
+                          <td className="py-2 text-amber-400 hover:text-amber-300 underline decoration-dotted">
                             {row.date}
                             {!row.complete && (
-                              <span className="text-stone-600" title={t("不是4个worker都有这天的记录", "Not all 4 workers have a record this day")}>
-                                {" "}*
-                              </span>
+                              <span className="text-stone-600"> *</span>
                             )}
                           </td>
                           {SUMMARY_WORKERS.map((w) => (
@@ -1827,6 +1830,181 @@ export default function GoldLedger() {
             </p>
           </div>
         </>
+      )}
+
+      {summaryDetailRow && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50"
+          onClick={() => setSummaryDetailRow(null)}
+        >
+          <div
+            className="bg-stone-900 border border-stone-700 rounded-2xl p-5 md:p-6 max-w-3xl w-full max-h-[88vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-medium text-stone-200">
+                {summaryDetailRow.date}
+                {!summaryDetailRow.complete && (
+                  <span className="text-stone-600 text-xs ml-2">
+                    {t("（不是4个worker都有记录）", "(not all 4 workers recorded)")}
+                  </span>
+                )}
+              </h3>
+              <button
+                onClick={() => setSummaryDetailRow(null)}
+                className="text-stone-500 hover:text-stone-300 p-2 -m-2 rounded-lg active:bg-stone-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="overflow-x-auto mb-5">
+              <table className="w-full text-sm min-w-[480px]">
+                <thead>
+                  <tr className="text-xs text-stone-500 border-b border-stone-800">
+                    <th className="text-left py-1.5 font-normal"></th>
+                    {SUMMARY_WORKERS.map((w) => (
+                      <th key={w} className="text-right py-1.5 font-normal">
+                        {w}
+                      </th>
+                    ))}
+                    <th className="text-right py-1.5 font-normal text-stone-400">
+                      {t("合计", "Total")}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-stone-800">
+                  <tr>
+                    <td className="py-1.5 text-stone-500">{t("上次实重", "Prev.")}</td>
+                    {SUMMARY_WORKERS.map((w) => (
+                      <td
+                        key={w}
+                        className="py-1.5 text-right font-mono tabular-nums text-stone-400"
+                      >
+                        {summaryDetailRow.byWorker[w] && summaryDetailRow.byWorker[w].prevWeight !== null
+                          ? fmtPlain(summaryDetailRow.byWorker[w].prevWeight)
+                          : "-"}
+                      </td>
+                    ))}
+                    <td className="py-1.5"></td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 text-stone-500">{t("要有", "Expected")}</td>
+                    {SUMMARY_WORKERS.map((w) => (
+                      <td
+                        key={w}
+                        className="py-1.5 text-right font-mono tabular-nums text-stone-300"
+                      >
+                        {summaryDetailRow.byWorker[w] && summaryDetailRow.byWorker[w].expected !== null
+                          ? fmtPlain(summaryDetailRow.byWorker[w].expected)
+                          : "-"}
+                      </td>
+                    ))}
+                    <td className="py-1.5 text-right font-mono tabular-nums text-stone-300">
+                      {summaryDetailRow.totalExpected === null ? "-" : fmtPlain(summaryDetailRow.totalExpected)}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 text-stone-500">{t("实重", "Actual")}</td>
+                    {SUMMARY_WORKERS.map((w) => (
+                      <td
+                        key={w}
+                        className="py-1.5 text-right font-mono tabular-nums text-stone-100"
+                      >
+                        {summaryDetailRow.byWorker[w] ? fmtPlain(summaryDetailRow.byWorker[w].actual) : "-"}
+                      </td>
+                    ))}
+                    <td className="py-1.5 text-right font-mono tabular-nums text-stone-100 font-medium">
+                      {summaryDetailRow.totalActual === null ? "-" : fmtPlain(summaryDetailRow.totalActual)}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 text-stone-500">{t("损耗", "Loss")}</td>
+                    {SUMMARY_WORKERS.map((w) => {
+                      const rec = summaryDetailRow.byWorker[w];
+                      const over2 =
+                        rec && rec.loss !== null && Math.abs(rec.loss) > LOSS_THRESHOLD;
+                      return (
+                        <td
+                          key={w}
+                          className={
+                            "py-1.5 text-right font-mono tabular-nums " +
+                            (!rec || rec.loss === null
+                              ? "text-stone-600"
+                              : over2
+                              ? "text-rose-400"
+                              : "text-emerald-400")
+                          }
+                        >
+                          {rec && rec.loss !== null ? fmt(rec.loss) : "-"}
+                        </td>
+                      );
+                    })}
+                    <td
+                      className={
+                        "py-1.5 text-right font-mono tabular-nums font-medium " +
+                        (summaryDetailRow.totalLoss === null
+                          ? "text-stone-600"
+                          : Math.abs(summaryDetailRow.totalLoss) > LOSS_THRESHOLD
+                          ? "text-rose-400"
+                          : "text-emerald-400")
+                      }
+                    >
+                      {summaryDetailRow.totalLoss === null ? "-" : fmt(summaryDetailRow.totalLoss)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h4 className="text-xs font-medium text-stone-400 mb-2">
+              {t("当天流水明细", "Flow entries for this day")}
+            </h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {SUMMARY_WORKERS.map((w) => {
+                const rec = summaryDetailRow.byWorker[w];
+                return (
+                  <div key={w} className="bg-stone-950 border border-stone-800 rounded-lg p-3">
+                    <p className="text-xs text-stone-400 font-medium mb-2">{w}</p>
+                    {!rec ? (
+                      <p className="text-xs text-stone-600">{t("这天没有记录", "No record this day")}</p>
+                    ) : rec.transactions && rec.transactions.length > 0 ? (
+                      <div className="divide-y divide-stone-900">
+                        {rec.transactions.map((tx) => (
+                          <div
+                            key={tx.id}
+                            className="flex items-center justify-between py-1.5 text-xs"
+                          >
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="text-stone-300 truncate">{tx.desc}</span>
+                              {tx.dest && (
+                                <span className="text-stone-600 bg-stone-900 rounded px-1.5 py-0.5 shrink-0">
+                                  {tx.dest}
+                                </span>
+                              )}
+                            </div>
+                            <span
+                              className={
+                                "font-mono tabular-nums shrink-0 " +
+                                (tx.amount > 0 ? "text-emerald-400" : "text-rose-400")
+                              }
+                            >
+                              {fmt(tx.amount)} g
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-stone-600">
+                        {t("这天没有流水（可能已归档清空）", "No flow entries (may have been archived)")}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
       )}
 
       {view === "workers" && (
