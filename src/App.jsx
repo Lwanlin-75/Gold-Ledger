@@ -1230,47 +1230,95 @@ export default function GoldLedger() {
     setExporting(true);
     setExportMsg("");
     try {
-      const summaryRows = [];
-      const detailRows = [];
+      // 按日期分组，收集所有还没导出过的记录
+      const byDate = new Map(); // date -> { worker: record }
       const keys = new Set();
+      let totalDays = 0;
+      let totalLines = 0;
       for (const w of WORKERS) {
         const hist = data[w]?.history || [];
         hist.forEach((r) => {
           if (r.exported) return;
           keys.add(`${w}__${r.date}`);
-          summaryRows.push({
-            Worker: w,
-            日期: r.date,
-            要有: r.expected ?? "",
-            实重: r.actual,
-            损耗: r.loss ?? "",
-          });
-          (r.transactions || []).forEach((t) => {
-            detailRows.push({
-              Worker: w,
-              日期: r.date,
-              描述: t.desc,
-              "加减(g)": t.amount,
-              去向: t.dest || "",
-            });
-          });
+          if (!byDate.has(r.date)) byDate.set(r.date, {});
+          byDate.get(r.date)[w] = r;
+          totalDays += 1;
+          totalLines += (r.transactions || []).length;
         });
       }
-      if (summaryRows.length === 0) {
-        setExportMsg("没有还没导出过的记录");
+      if (byDate.size === 0) {
+        setExportMsg(t("没有还没导出过的记录", "Nothing new to export"));
         setExporting(false);
         return;
       }
+      const dates = Array.from(byDate.keys()).sort();
+      const rows = [];
+      const colDate = t("日期", "Date");
+      const colType = t("类型", "Type");
+      const colDesc = t("描述", "Description");
+      const colAmount = t("加减(g)", "Amount(g)");
+      const colDest = t("去向/来源", "Destination/Source");
+      const colPrev = t("上次实重", "Prev. actual");
+      const colTotal = t("变动合计", "Net change");
+      const colExpected = t("要有", "Expected");
+      const colActual = t("实重", "Actual");
+      const colLoss = t("损耗", "Loss");
+      const typeEntry = t("流水", "Entry");
+      const typeSummary = t("统计", "Summary");
+
+      for (const date of dates) {
+        const byWorker = byDate.get(date);
+        for (const w of WORKERS) {
+          const rec = byWorker[w];
+          if (!rec) continue;
+          (rec.transactions || []).forEach((tx) => {
+            rows.push({
+              [colDate]: date,
+              [colType]: typeEntry,
+              Worker: w,
+              [colDesc]: tx.desc,
+              [colAmount]: tx.amount,
+              [colDest]: tx.dest || "",
+              [colPrev]: "",
+              [colTotal]: "",
+              [colExpected]: "",
+              [colActual]: "",
+              [colLoss]: "",
+            });
+          });
+        }
+        for (const w of WORKERS) {
+          const rec = byWorker[w];
+          if (!rec) continue;
+          rows.push({
+            [colDate]: date,
+            [colType]: typeSummary,
+            Worker: w,
+            [colDesc]: "",
+            [colAmount]: "",
+            [colDest]: "",
+            [colPrev]: rec.prevWeight ?? "",
+            [colTotal]: rec.total ?? "",
+            [colExpected]: rec.expected ?? "",
+            [colActual]: rec.actual,
+            [colLoss]: rec.loss ?? "",
+          });
+        }
+        rows.push({});
+      }
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), "每日汇总");
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detailRows), "流水明细");
+      const ws = XLSX.utils.json_to_sheet(rows);
+      XLSX.utils.book_append_sheet(wb, ws, t("对账记录", "Reconciliation"));
       XLSX.writeFile(wb, `金重对账_${todayStr()}.xlsx`);
       setPendingExportKeys(keys);
       setExportMsg(
-        `已导出 ${summaryRows.length} 天、${detailRows.length} 条流水。确认文件保存好后，可以点下面按钮清空这批流水明细（汇总数字会保留）。`
+        t(
+          `已导出 ${totalDays} 天、${totalLines} 条流水。确认文件保存好后，可以点下面按钮清空这批流水明细（汇总数字会保留）。`,
+          `Exported ${totalDays} day(s), ${totalLines} line(s). Once you've saved the file, you can clear this batch's line items below (summary numbers stay).`
+        )
       );
     } catch {
-      setExportMsg("导出失败，请重试");
+      setExportMsg(t("导出失败，请重试", "Export failed, please retry"));
     } finally {
       setExporting(false);
     }
