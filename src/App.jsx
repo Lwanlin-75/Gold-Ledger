@@ -193,6 +193,9 @@ export default function GoldLedger() {
   const [descInput, setDescInput] = useState("");
   const [amountInput, setAmountInput] = useState("");
   const [destInput, setDestInput] = useState("");
+  const [repairAmount, setRepairAmount] = useState("");
+  const [repairDest, setRepairDest] = useState("JJ");
+  const [repairError, setRepairError] = useState("");
   const [rowError, setRowError] = useState("");
   const [actualInput, setActualInput] = useState("");
   const [boxWeightDraft, setBoxWeightDraft] = useState("");
@@ -220,6 +223,9 @@ export default function GoldLedger() {
   const [detailDesc, setDetailDesc] = useState("");
   const [detailAmount, setDetailAmount] = useState("");
   const [detailDest, setDetailDest] = useState("");
+  const [detailRepairAmount, setDetailRepairAmount] = useState("");
+  const [detailRepairDest, setDetailRepairDest] = useState("JJ");
+  const [detailRepairError, setDetailRepairError] = useState("");
   const [detailRowError, setDetailRowError] = useState("");
   const [detailError, setDetailError] = useState("");
   const [detailSaving, setDetailSaving] = useState(false);
@@ -444,11 +450,15 @@ export default function GoldLedger() {
   function addRow() {
     const amt = parseFloat(amountInput);
     if (!descInput.trim()) {
-      setRowError("请填写描述");
+      setRowError(t("请填写描述", "Please enter a description"));
       return;
     }
     if (amountInput === "" || Number.isNaN(amt) || amt === 0) {
-      setRowError("请填写有效的加减数量（不能为0）");
+      setRowError(t("请填写有效的加减数量（不能为0）", "Please enter a valid amount (can't be 0)"));
+      return;
+    }
+    if (!destInput) {
+      setRowError(t("请选择去向/来源", "Please choose a destination/source"));
       return;
     }
     const item = { id: String(Date.now() + Math.random()), desc: descInput.trim(), amount: amt, dest: destInput };
@@ -461,6 +471,24 @@ export default function GoldLedger() {
 
   function removeRow(id) {
     removeDraftItemLocal(activeWorker, dateInput, id);
+  }
+
+  // 维修快捷录入：描述固定"维修"，去向/来源在 JJ / PD门市 之间选
+  function addRepairRow() {
+    const amt = parseFloat(repairAmount);
+    if (repairAmount === "" || Number.isNaN(amt) || amt === 0) {
+      setRepairError(t("请填写有效的加减数量（不能为0）", "Please enter a valid amount (can't be 0)"));
+      return;
+    }
+    const item = {
+      id: String(Date.now() + Math.random()),
+      desc: t("维修", "Repair"),
+      amount: amt,
+      dest: repairDest,
+    };
+    addDraftItemLocal(activeWorker, dateInput, item);
+    setRepairAmount("");
+    setRepairError("");
   }
 
   // 加一条暂存流水（本地立即显示 + 后台走安全通道同步，user也能用）
@@ -1098,11 +1126,15 @@ export default function GoldLedger() {
   function addDetailRow() {
     const amt = parseFloat(detailAmount);
     if (!detailDesc.trim()) {
-      setDetailRowError("请填写描述");
+      setDetailRowError(t("请填写描述", "Please enter a description"));
       return;
     }
     if (detailAmount === "" || Number.isNaN(amt) || amt === 0) {
-      setDetailRowError("请填写有效的加减数量（不能为0）");
+      setDetailRowError(t("请填写有效的加减数量（不能为0）", "Please enter a valid amount (can't be 0)"));
+      return;
+    }
+    if (!detailDest) {
+      setDetailRowError(t("请选择去向/来源", "Please choose a destination/source"));
       return;
     }
     setEditTransactions((list) => [
@@ -1117,6 +1149,26 @@ export default function GoldLedger() {
 
   function removeDetailRow(id) {
     setEditTransactions((list) => list.filter((t) => t.id !== id));
+  }
+
+  // 详情弹窗里的维修快捷录入，逻辑跟主流水那个一样
+  function addDetailRepairRow() {
+    const amt = parseFloat(detailRepairAmount);
+    if (detailRepairAmount === "" || Number.isNaN(amt) || amt === 0) {
+      setDetailRepairError(t("请填写有效的加减数量（不能为0）", "Please enter a valid amount (can't be 0)"));
+      return;
+    }
+    setEditTransactions((list) => [
+      ...list,
+      {
+        id: Date.now() + Math.random(),
+        desc: t("维修", "Repair"),
+        amount: amt,
+        dest: detailRepairDest,
+      },
+    ]);
+    setDetailRepairAmount("");
+    setDetailRepairError("");
   }
 
   async function saveDetailEdit() {
@@ -1960,7 +2012,7 @@ export default function GoldLedger() {
           >
             {destinations.map((d) => (
               <option key={d} value={d}>
-                {d === "" ? t("去向（可选）", "Destination (optional)") : d}
+                {d === "" ? t("去向/来源（必填）", "Destination/Source (required)") : d}
               </option>
             ))}
           </select>
@@ -1973,6 +2025,42 @@ export default function GoldLedger() {
           </button>
         </div>
         {rowError && <p className="text-xs text-rose-400 mb-2">{rowError}</p>}
+
+        <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-stone-800">
+          <span className="text-xs text-stone-500 shrink-0">{t("维修快捷录入：", "Repair quick entry:")}</span>
+          <input
+            type="number"
+            step="0.01"
+            placeholder={t("+/- 克", "+/- g")}
+            value={repairAmount}
+            onChange={(e) => setRepairAmount(e.target.value)}
+            className="w-28 bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500 font-mono"
+          />
+          <div className="flex rounded-lg border border-stone-700 overflow-hidden">
+            {["JJ", "PD门市"].map((opt) => (
+              <button
+                key={opt}
+                onClick={() => setRepairDest(opt)}
+                className={
+                  "px-3 py-2 text-sm " +
+                  (repairDest === opt
+                    ? "bg-amber-500 text-stone-950"
+                    : "bg-stone-950 text-stone-400 hover:text-stone-200")
+                }
+              >
+                {opt}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={addRepairRow}
+            className="flex items-center justify-center gap-1 bg-stone-800 hover:bg-stone-700 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100"
+          >
+            <Plus className="w-4 h-4" />
+            {t("添加维修", "Add repair")}
+          </button>
+        </div>
+        {repairError && <p className="text-xs text-rose-400 mt-2">{repairError}</p>}
 
         {curDraft.length === 0 ? (
           <p className="text-sm text-stone-600 py-4 text-center">
@@ -2327,7 +2415,7 @@ export default function GoldLedger() {
                   >
                     {detailDestinations.map((d) => (
                       <option key={d} value={d}>
-                        {d === "" ? t("去向", "Destination") : d}
+                        {d === "" ? t("去向/来源（必填）", "Destination/Source (required)") : d}
                       </option>
                     ))}
                   </select>
@@ -2340,6 +2428,46 @@ export default function GoldLedger() {
                 </div>
                 {detailRowError && (
                   <p className="text-xs text-rose-400 mb-2">{detailRowError}</p>
+                )}
+
+                <div className="flex flex-wrap items-center gap-2 mb-3 pb-3 border-b border-stone-800">
+                  <span className="text-xs text-stone-500 shrink-0">
+                    {t("维修快捷录入：", "Repair quick entry:")}
+                  </span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    placeholder={t("+/- 克", "+/- g")}
+                    value={detailRepairAmount}
+                    onChange={(e) => setDetailRepairAmount(e.target.value)}
+                    className="w-28 bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:outline-none focus:border-amber-500 font-mono"
+                  />
+                  <div className="flex rounded-lg border border-stone-700 overflow-hidden">
+                    {["JJ", "PD门市"].map((opt) => (
+                      <button
+                        key={opt}
+                        onClick={() => setDetailRepairDest(opt)}
+                        className={
+                          "px-3 py-2 text-sm " +
+                          (detailRepairDest === opt
+                            ? "bg-amber-500 text-stone-950"
+                            : "bg-stone-950 text-stone-400 hover:text-stone-200")
+                        }
+                      >
+                        {opt}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={addDetailRepairRow}
+                    className="flex items-center justify-center gap-1 bg-stone-800 hover:bg-stone-700 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100"
+                  >
+                    <Plus className="w-4 h-4" />
+                    {t("添加维修", "Add repair")}
+                  </button>
+                </div>
+                {detailRepairError && (
+                  <p className="text-xs text-rose-400 mb-3">{detailRepairError}</p>
                 )}
 
                 {editTransactions.length === 0 ? (
