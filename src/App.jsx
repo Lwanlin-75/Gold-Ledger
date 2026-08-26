@@ -1172,39 +1172,38 @@ export default function GoldLedger() {
   }
 
   async function saveDetailEdit() {
-    if (!isAdmin) return;
     if (!showDetail) return;
     const { worker, index } = showDetail;
     const record = data[worker].history[index];
     if (record.exported) return;
     const num = parseFloat(editActual);
     if (editActual === "" || Number.isNaN(num)) {
-      setDetailError("请填写有效的实重");
+      setDetailError(t("请填写有效的实重", "Please enter a valid actual weight"));
       return;
     }
     if (!editDate) {
-      setDetailError("请选择日期");
+      setDetailError(t("请选择日期", "Please choose a date"));
       return;
     }
     setDetailSaving(true);
-    const newHistoryRaw = [...data[worker].history];
-    newHistoryRaw[index] = {
-      ...newHistoryRaw[index],
-      transactions: editTransactions,
-      actual: num,
-      date: editDate,
-    };
-    const newHistory = recomputeChain(newHistoryRaw);
-    const lastWeight = newHistory.length
-      ? newHistory[newHistory.length - 1].actual
-      : null;
-    const nextWorkerData = { lastWeight, history: newHistory, drafts: data[worker].drafts || {} };
     try {
-      await persistWorker(worker, nextWorkerData);
-      setData((d) => ({ ...d, [worker]: nextWorkerData }));
+      const { error } = await supabase.rpc("edit_history_record", {
+        p_worker: worker,
+        p_old_date: record.date,
+        p_new_date: editDate,
+        p_transactions: editTransactions,
+        p_actual: num,
+      });
+      if (error) throw error;
+      await refreshWorkerData(worker);
       setShowDetail(null);
     } catch {
-      setDetailError("保存失败，检查网络后重试");
+      setDetailError(
+        t(
+          "保存失败——检查网络，或者这天已经超出你能改的范围（最近3天）",
+          "Save failed — check your connection, or this date may be outside what you're allowed to edit (last 3 days)"
+        )
+      );
     } finally {
       setDetailSaving(false);
     }
@@ -1506,8 +1505,8 @@ export default function GoldLedger() {
       {!isAdmin && (
         <p className="text-xs text-stone-600 mb-4">
           {t(
-            "你是普通账号，只能看到最近3天的记录；导出、撤销、编辑历史等功能只有管理员能用。",
-            "You have a standard account: only the last 3 days are visible. Export, undo, and edit-history are admin-only."
+            "你是普通账号，只能看到最近3天的记录，也只能修改这最近3天内的记录；导出、撤销这些功能只有管理员能用。",
+            "You have a standard account: only the last 3 days are visible, and you can only edit records within those 3 days. Export and undo remain admin-only."
           )}
         </p>
       )}
