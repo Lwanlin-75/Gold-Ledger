@@ -268,6 +268,7 @@ export default function GoldLedger() {
   const [selectedOutgoingKeys, setSelectedOutgoingKeys] = useState(() => new Set());
   const [selectedIncomingKeys, setSelectedIncomingKeys] = useState(() => new Set());
   const [matchSaving, setMatchSaving] = useState(false);
+  const [refreshingAll, setRefreshingAll] = useState(false);
   const [matchMsg, setMatchMsg] = useState("");
 
   // 账号管理（仅admin）
@@ -343,43 +344,45 @@ export default function GoldLedger() {
     }));
   }
 
+  async function loadAllData() {
+    const { data: rows, error } = await supabase.rpc("get_ledger_rows", {
+      p_keys: WORKERS,
+    });
+    if (error) throw error;
+    const next = Object.fromEntries(WORKERS.map((w) => [w, emptyWorkerData()]));
+    for (const row of rows || []) {
+      next[row.worker] = { ...emptyWorkerData(), ...(row.data || {}) };
+    }
+    const { data: shipRaw, error: shipErr } = await supabase.rpc("get_special_row", {
+      p_key: SPECIAL_KEYS.SHIPMENTS,
+    });
+    if (shipErr) throw shipErr;
+    const nextShipments = { ...emptyShipmentData(), ...(shipRaw || {}) };
+    const { data: transRaw, error: transErr } = await supabase.rpc("get_special_row", {
+      p_key: SPECIAL_KEYS.TRANSFERS,
+    });
+    if (transErr) throw transErr;
+    const nextTransfers = { ...emptyTransferData(), ...(transRaw || {}) };
+    setData(next);
+    setShipmentData(nextShipments);
+    setTransferData(nextTransfers);
+    setThresholdDraft(String(nextTransfers.threshold ?? 0.05));
+    setShipThresholdDraft(String(nextShipments.threshold ?? 0.05));
+  }
+
   useEffect(() => {
     if (!session || !role) return;
     let cancelled = false;
-    async function load() {
-      const { data: rows, error } = await supabase.rpc("get_ledger_rows", {
-        p_keys: WORKERS,
+    loadAllData()
+      .then(() => {
+        if (!cancelled) setReady(true);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLoadError("读取记录失败（检查网络或权限），先从空白开始，保存时会重试。");
+          setReady(true);
+        }
       });
-      if (error) throw error;
-      const next = Object.fromEntries(WORKERS.map((w) => [w, emptyWorkerData()]));
-      for (const row of rows || []) {
-        next[row.worker] = { ...emptyWorkerData(), ...(row.data || {}) };
-      }
-      const { data: shipRaw, error: shipErr } = await supabase.rpc("get_special_row", {
-        p_key: SPECIAL_KEYS.SHIPMENTS,
-      });
-      if (shipErr) throw shipErr;
-      const nextShipments = { ...emptyShipmentData(), ...(shipRaw || {}) };
-      const { data: transRaw, error: transErr } = await supabase.rpc("get_special_row", {
-        p_key: SPECIAL_KEYS.TRANSFERS,
-      });
-      if (transErr) throw transErr;
-      const nextTransfers = { ...emptyTransferData(), ...(transRaw || {}) };
-      if (!cancelled) {
-        setData(next);
-        setShipmentData(nextShipments);
-        setTransferData(nextTransfers);
-        setThresholdDraft(String(nextTransfers.threshold ?? 0.05));
-        setShipThresholdDraft(String(nextShipments.threshold ?? 0.05));
-        setReady(true);
-      }
-    }
-    load().catch(() => {
-      if (!cancelled) {
-        setLoadError("读取记录失败（检查网络或权限），先从空白开始，保存时会重试。");
-        setReady(true);
-      }
-    });
     return () => {
       cancelled = true;
     };
@@ -448,6 +451,15 @@ export default function GoldLedger() {
   const lossOver = loss !== null && Math.abs(loss) > LOSS_THRESHOLD;
 
   function addRow() {
+    if (recentUnmatchedCount > UNMATCHED_LIMIT) {
+      setRowError(
+        t(
+          `最近2天有 ${recentUnmatchedCount} 笔还没配对（超过${UNMATCHED_LIMIT}笔），请先去"转手核对"把配对补上，才能继续记流水`,
+          `${recentUnmatchedCount} unpaired entries in the last 2 days (over the limit of ${UNMATCHED_LIMIT}). Please pair them in "Transfers" before adding more flow entries.`
+        )
+      );
+      return;
+    }
     const amt = parseFloat(amountInput);
     if (!descInput.trim()) {
       setRowError(t("请填写描述", "Please enter a description"));
@@ -475,6 +487,15 @@ export default function GoldLedger() {
 
   // 维修快捷录入：描述固定"维修"，去向/来源在 JJ / PD门市 之间选
   function addRepairRow() {
+    if (recentUnmatchedCount > UNMATCHED_LIMIT) {
+      setRepairError(
+        t(
+          `最近2天有 ${recentUnmatchedCount} 笔还没配对（超过${UNMATCHED_LIMIT}笔），请先去"转手核对"把配对补上，才能继续记流水`,
+          `${recentUnmatchedCount} unpaired entries in the last 2 days (over the limit of ${UNMATCHED_LIMIT}). Please pair them in "Transfers" before adding more flow entries.`
+        )
+      );
+      return;
+    }
     const amt = parseFloat(repairAmount);
     if (repairAmount === "" || Number.isNaN(amt) || amt === 0) {
       setRepairError(t("请填写有效的加减数量（不能为0）", "Please enter a valid amount (can't be 0)"));
@@ -860,6 +881,18 @@ export default function GoldLedger() {
 
 
   // ---- 转手核对 ----
+  async function refreshAll() {
+    setRefreshingAll(true);
+    try {
+      await loadAllData();
+      setMatchMsg(t("已刷新最新数据", "Refreshed with the latest data"));
+    } catch {
+      setMatchMsg(t("刷新失败，检查网络后重试", "Refresh failed, check your connection and retry"));
+    } finally {
+      setRefreshingAll(false);
+    }
+  }
+
   async function saveThreshold() {
     if (!isAdmin) return;
     const t = parseFloat(thresholdDraft);
@@ -924,6 +957,15 @@ export default function GoldLedger() {
     }
     return items;
   }, [data, matchedItemIds]);
+
+  // 最近2天内还没配对的记录数——超过5笔就先不给记新流水，逼着及时去配对
+  const recentUnmatchedCount = useMemo(() => {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 2);
+    const cutoffStr = cutoff.toISOString().slice(0, 10);
+    return matchableItems.filter((i) => i.date >= cutoffStr).length;
+  }, [matchableItems]);
+  const UNMATCHED_LIMIT = 5;
 
   function itemKey(item) {
     return `${item.worker}|${item.date}|${item.id}`;
@@ -1124,6 +1166,15 @@ export default function GoldLedger() {
   }
 
   function addDetailRow() {
+    if (recentUnmatchedCount > UNMATCHED_LIMIT) {
+      setDetailRowError(
+        t(
+          `最近2天有 ${recentUnmatchedCount} 笔还没配对（超过${UNMATCHED_LIMIT}笔），请先去"转手核对"把配对补上，才能继续记流水`,
+          `${recentUnmatchedCount} unpaired entries in the last 2 days (over the limit of ${UNMATCHED_LIMIT}). Please pair them in "Transfers" before adding more flow entries.`
+        )
+      );
+      return;
+    }
     const amt = parseFloat(detailAmount);
     if (!detailDesc.trim()) {
       setDetailRowError(t("请填写描述", "Please enter a description"));
@@ -2035,6 +2086,16 @@ export default function GoldLedger() {
         <h2 className="text-sm font-medium text-stone-300 mb-3">
           {dateInput} {t("流水", "flow")}（{activeWorker}）
         </h2>
+
+        {recentUnmatchedCount > UNMATCHED_LIMIT && (
+          <div className="bg-rose-500/10 border border-rose-500/40 rounded-lg p-3 mb-3 text-xs text-rose-400 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            {t(
+              `最近2天有 ${recentUnmatchedCount} 笔转手记录还没配对（超过${UNMATCHED_LIMIT}笔上限），暂时不能加新流水，去"转手核对"页把配对补上`,
+              `${recentUnmatchedCount} transfer entries from the last 2 days are still unpaired (over the limit of ${UNMATCHED_LIMIT}). New flow entries are blocked — go to "Transfers" to pair them first.`
+            )}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-[1fr_120px_130px_auto] gap-2 mb-2">
           <input
@@ -3135,12 +3196,49 @@ export default function GoldLedger() {
       {view === "transfers" && (
         <>
           <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
-                <p className="text-xs text-stone-500">
+                <div className="flex items-start justify-between gap-3 mb-2">
+                  <p className="text-xs text-stone-500">
+                    {t(
+                      '双方各自照平常那样，在"对账"页自己的今日流水里记好出/入的重量、去向选对方就行——不用等对方、不用先讲好。填完之后来这里把两边的记录配对起来看差异。',
+                      'Each side just logs their own weight as usual, in their own daily flow on the Reconcile tab — set the destination to the other party. No need to wait for or coordinate with each other. Come back here afterward to pair the two entries and see the difference.'
+                    )}
+                  </p>
+                  <button
+                    onClick={refreshAll}
+                    disabled={refreshingAll}
+                    className="shrink-0 flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100 disabled:opacity-60"
+                  >
+                    {refreshingAll ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <History className="w-3.5 h-3.5" />
+                    )}
+                    {t("刷新", "Refresh")}
+                  </button>
+                </div>
+                <p className="text-xs text-stone-600">
                   {t(
-                    '双方各自照平常那样，在"对账"页自己的今日流水里记好出/入的重量、去向选对方就行——不用等对方、不用先讲好。填完之后来这里把两边的记录配对起来看差异。',
-                    'Each side just logs their own weight as usual, in their own daily flow on the Reconcile tab — set the destination to the other party. No need to wait for or coordinate with each other. Come back here afterward to pair the two entries and see the difference.'
+                    "别人在别的设备上刚配对/记完流水，这边不会自动更新，点这个按钮拉最新的。",
+                    "If someone else just paired or logged a flow entry on another device, this page won't update on its own — tap Refresh to pull the latest."
                   )}
                 </p>
+              </div>
+
+              <div
+                className={
+                  "rounded-xl p-3 mb-6 border text-sm flex items-center gap-2 " +
+                  (recentUnmatchedCount > UNMATCHED_LIMIT
+                    ? "bg-rose-500/10 border-rose-500/40 text-rose-400"
+                    : "bg-stone-900 border-stone-800 text-stone-400")
+                }
+              >
+                {recentUnmatchedCount > UNMATCHED_LIMIT && (
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                )}
+                {t(
+                  `最近2天未配对：${recentUnmatchedCount} / ${UNMATCHED_LIMIT}${recentUnmatchedCount > UNMATCHED_LIMIT ? "——已超过限制，暂时不能记新流水，先配对" : ""}`,
+                  `Unpaired in the last 2 days: ${recentUnmatchedCount} / ${UNMATCHED_LIMIT}${recentUnmatchedCount > UNMATCHED_LIMIT ? " — over the limit, new flow entries are blocked until you pair some" : ""}`
+                )}
               </div>
 
               {(selectedOutgoingList.length > 0 || selectedIncomingList.length > 0) && (
