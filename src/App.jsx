@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, Fragment } from "react";
 import * as XLSX from "xlsx";
 import { supabase } from "./supabaseClient.js";
 import {
@@ -932,6 +932,83 @@ export default function GoldLedger() {
   function getTotalIn(r) {
     return r.totalIn !== undefined ? r.totalIn : r.amountB || 0;
   }
+
+  // ---- 总览：拼成表格式（跟原本手工记账格式一样，配对的两边同一天就合并一行）----
+  const spreadsheetRows = useMemo(() => {
+    const matchInfoByItemId = new Map();
+    for (const r of matchRecords) {
+      const outs = getOutgoingList(r);
+      const ins = getIncomingList(r);
+      const simple = outs.length === 1 && ins.length === 1;
+      for (const i of outs) {
+        matchInfoByItemId.set(i.itemId, { record: r, partners: ins, simple });
+      }
+      for (const i of ins) {
+        matchInfoByItemId.set(i.itemId, { record: r, partners: outs, simple });
+      }
+    }
+
+    const consumed = new Set();
+    const rows = [];
+    for (const w of SUMMARY_WORKERS) {
+      const hist = (data[w] && data[w].history) || [];
+      for (const rec of hist) {
+        for (const tx of rec.transactions || []) {
+          const key = `${w}|${rec.date}|${tx.id}`;
+          if (consumed.has(key)) continue;
+          const info = matchInfoByItemId.get(tx.id);
+          if (info && info.simple) {
+            const partner = info.partners[0];
+            if (partner.date === rec.date && SUMMARY_WORKERS.includes(partner.worker)) {
+              consumed.add(key);
+              consumed.add(`${partner.worker}|${partner.date}|${partner.itemId}`);
+              rows.push({
+                date: rec.date,
+                desc: tx.desc,
+                matched: true,
+                matchId: info.record.id,
+                cells: { [w]: tx.amount, [partner.worker]: partner.amount },
+              });
+              continue;
+            }
+          }
+          consumed.add(key);
+          rows.push({
+            date: rec.date,
+            desc: tx.desc + (tx.dest ? ` [${tx.dest}]` : ""),
+            matched: !!info,
+            matchId: info ? info.record.id : null,
+            cells: { [w]: tx.amount },
+          });
+        }
+      }
+    }
+    rows.sort((a, b) => a.date.localeCompare(b.date));
+    return rows;
+  }, [data, matchRecords]);
+
+  const spreadsheetByDate = useMemo(() => {
+    const byDate = new Map();
+    for (const row of spreadsheetRows) {
+      if (!byDate.has(row.date)) byDate.set(row.date, []);
+      byDate.get(row.date).push(row);
+    }
+    const summaryByDate = new Map();
+    for (const h of summaryHistory) summaryByDate.set(h.date, h);
+    const dates = Array.from(byDate.keys()).sort((a, b) => a.localeCompare(b));
+    return dates.map((date) => ({
+      date,
+      rows: byDate.get(date),
+      summary: summaryByDate.get(date) || null,
+    }));
+  }, [spreadsheetRows, summaryHistory]);
+
+  function matchTagColor(matchId) {
+    if (!matchId) return "";
+    let hash = 0;
+    for (let i = 0; i < matchId.length; i++) hash = (hash * 31 + matchId.charCodeAt(i)) % 360;
+    return `hsl(${hash}, 60%, 55%)`;
+  }
   const matchedItemIds = useMemo(() => {
     const s = new Set();
     for (const r of matchRecords) {
@@ -1359,6 +1436,55 @@ export default function GoldLedger() {
       const wb = XLSX.utils.book_new();
       const ws = XLSX.utils.json_to_sheet(rows);
       XLSX.utils.book_append_sheet(wb, ws, t("对账记录", "Reconciliation"));
+
+      // 第二个sheet：跟手工记账本一样的格式（JJ/PD Lv1/PD Lv2/Lv1车花并排+/-栏，配对的转手合并一行）
+      const dateSet = new Set(dates);
+      const ledgerDays = spreadsheetByDate.filter((d) => dateSet.has(d.date));
+      if (ledgerDays.length > 0) {
+        const headerRow1 = [t("日期", "Date"), t("项目", "Item")];
+        const headerRow2 = ["", ""];
+        for (const w of SUMMARY_WORKERS) {
+          headerRow1.push(w, "");
+          headerRow2.push("+", "-");
+        }
+        const aoa = [headerRow1, headerRow2];
+        for (const day of ledgerDays) {
+          for (const row of day.rows) {
+            const line = [day.rows.indexOf(row) === 0 ? day.date : "", row.desc];
+            for (const w of SUMMARY_WORKERS) {
+              const amt = row.cells[w];
+              line.push(
+                amt !== undefined && amt > 0 ? Math.round(amt * 100) / 100 : "",
+                amt !== undefined && amt < 0 ? Math.round(Math.abs(amt) * 100) / 100 : ""
+              );
+            }
+            aoa.push(line);
+          }
+          if (day.summary) {
+            for (const [label, field] of [
+              [t("要有", "Expected"), "expected"],
+              [t("实重", "Actual"), "actual"],
+              [t("损耗", "Loss"), "loss"],
+            ]) {
+              const line = ["", label];
+              for (const w of SUMMARY_WORKERS) {
+                const rec = day.summary.byWorker[w];
+                const v = rec ? rec[field] : null;
+                line.push(v !== null && v !== undefined ? Math.round(v * 100) / 100 : "", "");
+              }
+              aoa.push(line);
+            }
+          }
+          aoa.push([]);
+        }
+        const ws2 = XLSX.utils.aoa_to_sheet(aoa);
+        ws2["!merges"] = SUMMARY_WORKERS.map((_, i) => ({
+          s: { r: 0, c: 2 + i * 2 },
+          e: { r: 0, c: 3 + i * 2 },
+        }));
+        XLSX.utils.book_append_sheet(wb, ws2, t("手工记账格式", "Ledger format"));
+      }
+
       XLSX.writeFile(wb, `金重对账_${todayStr()}.xlsx`);
       setPendingExportKeys(keys);
       setExportMsg(
@@ -3195,33 +3321,19 @@ export default function GoldLedger() {
 
       {view === "transfers" && (
         <>
-          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 mb-6">
-                <div className="flex items-start justify-between gap-3 mb-2">
-                  <p className="text-xs text-stone-500">
-                    {t(
-                      '双方各自照平常那样，在"对账"页自己的今日流水里记好出/入的重量、去向选对方就行——不用等对方、不用先讲好。填完之后来这里把两边的记录配对起来看差异。',
-                      'Each side just logs their own weight as usual, in their own daily flow on the Reconcile tab — set the destination to the other party. No need to wait for or coordinate with each other. Come back here afterward to pair the two entries and see the difference.'
-                    )}
-                  </p>
-                  <button
-                    onClick={refreshAll}
-                    disabled={refreshingAll}
-                    className="shrink-0 flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100 disabled:opacity-60"
-                  >
-                    {refreshingAll ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <History className="w-3.5 h-3.5" />
-                    )}
-                    {t("刷新", "Refresh")}
-                  </button>
-                </div>
-                <p className="text-xs text-stone-600">
-                  {t(
-                    "别人在别的设备上刚配对/记完流水，这边不会自动更新，点这个按钮拉最新的。",
-                    "If someone else just paired or logged a flow entry on another device, this page won't update on its own — tap Refresh to pull the latest."
+          <div className="flex justify-end mb-6">
+                <button
+                  onClick={refreshAll}
+                  disabled={refreshingAll}
+                  className="shrink-0 flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100 disabled:opacity-60"
+                >
+                  {refreshingAll ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <History className="w-3.5 h-3.5" />
                   )}
-                </p>
+                  {t("刷新", "Refresh")}
+                </button>
               </div>
 
               <div
