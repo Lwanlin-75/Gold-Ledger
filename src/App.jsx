@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, Fragment } from "react";
 import * as XLSX from "xlsx";
 import { supabase } from "./supabaseClient.js";
 import {
@@ -932,6 +932,83 @@ export default function GoldLedger() {
   function getTotalIn(r) {
     return r.totalIn !== undefined ? r.totalIn : r.amountB || 0;
   }
+
+  // ---- 总览：拼成表格式（跟原本手工记账格式一样，配对的两边同一天就合并一行）----
+  const spreadsheetRows = useMemo(() => {
+    const matchInfoByItemId = new Map();
+    for (const r of matchRecords) {
+      const outs = getOutgoingList(r);
+      const ins = getIncomingList(r);
+      const simple = outs.length === 1 && ins.length === 1;
+      for (const i of outs) {
+        matchInfoByItemId.set(i.itemId, { record: r, partners: ins, simple });
+      }
+      for (const i of ins) {
+        matchInfoByItemId.set(i.itemId, { record: r, partners: outs, simple });
+      }
+    }
+
+    const consumed = new Set();
+    const rows = [];
+    for (const w of SUMMARY_WORKERS) {
+      const hist = (data[w] && data[w].history) || [];
+      for (const rec of hist) {
+        for (const tx of rec.transactions || []) {
+          const key = `${w}|${rec.date}|${tx.id}`;
+          if (consumed.has(key)) continue;
+          const info = matchInfoByItemId.get(tx.id);
+          if (info && info.simple) {
+            const partner = info.partners[0];
+            if (partner.date === rec.date && SUMMARY_WORKERS.includes(partner.worker)) {
+              consumed.add(key);
+              consumed.add(`${partner.worker}|${partner.date}|${partner.itemId}`);
+              rows.push({
+                date: rec.date,
+                desc: tx.desc,
+                matched: true,
+                matchId: info.record.id,
+                cells: { [w]: tx.amount, [partner.worker]: partner.amount },
+              });
+              continue;
+            }
+          }
+          consumed.add(key);
+          rows.push({
+            date: rec.date,
+            desc: tx.desc + (tx.dest ? ` [${tx.dest}]` : ""),
+            matched: !!info,
+            matchId: info ? info.record.id : null,
+            cells: { [w]: tx.amount },
+          });
+        }
+      }
+    }
+    rows.sort((a, b) => a.date.localeCompare(b.date));
+    return rows;
+  }, [data, matchRecords]);
+
+  const spreadsheetByDate = useMemo(() => {
+    const byDate = new Map();
+    for (const row of spreadsheetRows) {
+      if (!byDate.has(row.date)) byDate.set(row.date, []);
+      byDate.get(row.date).push(row);
+    }
+    const summaryByDate = new Map();
+    for (const h of summaryHistory) summaryByDate.set(h.date, h);
+    const dates = Array.from(byDate.keys()).sort((a, b) => a.localeCompare(b));
+    return dates.map((date) => ({
+      date,
+      rows: byDate.get(date),
+      summary: summaryByDate.get(date) || null,
+    }));
+  }, [spreadsheetRows, summaryHistory]);
+
+  function matchTagColor(matchId) {
+    if (!matchId) return "";
+    let hash = 0;
+    for (let i = 0; i < matchId.length; i++) hash = (hash * 31 + matchId.charCodeAt(i)) % 360;
+    return `hsl(${hash}, 60%, 55%)`;
+  }
   const matchedItemIds = useMemo(() => {
     const s = new Set();
     for (const r of matchRecords) {
@@ -1681,259 +1758,153 @@ export default function GoldLedger() {
             </div>
           </div>
 
-          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5">
+          <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 md:p-5 overflow-x-auto">
             <h2 className="text-sm font-medium text-stone-300 mb-3 flex items-center gap-2">
               <History className="w-4 h-4" />
-              {t("历史合并记录（按日期，最近30天，点日期看完整表格）", "Combined history (by date, last 30 days, click a date for the full table)")}
+              {t("对账表（按日期，跟手工记账格式一样）", "Reconciliation sheet (by date, same layout as the manual ledger)")}
             </h2>
-            {summaryHistory.length === 0 ? (
+            {spreadsheetByDate.length === 0 ? (
               <p className="text-sm text-stone-600 py-4 text-center">
                 {t("还没有历史记录", "No history yet")}
               </p>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="text-xs text-stone-500 border-b border-stone-800">
-                      <th className="text-left py-2 font-normal">{t("日期", "Date")}</th>
-                      {SUMMARY_WORKERS.map((w) => (
-                        <th key={w} className="text-right py-2 font-normal">
-                          {w}
-                        </th>
-                      ))}
-                      <th className="text-right py-2 font-normal">{t("合计实重", "Total actual")}</th>
-                      <th className="text-right py-2 font-normal">{t("合计损耗", "Total loss")}</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-stone-800">
-                    {summaryHistory.map((row) => {
-                      const over =
-                        row.totalLoss !== null && Math.abs(row.totalLoss) > LOSS_THRESHOLD;
-                      return (
+              <table className="text-sm border-collapse min-w-[900px]">
+                <thead>
+                  <tr className="text-xs text-stone-500 border-b border-stone-800">
+                    <th className="text-left py-2 pr-3 font-normal">{t("日期", "Date")}</th>
+                    <th className="text-left py-2 pr-3 font-normal">{t("项目", "Item")}</th>
+                    {SUMMARY_WORKERS.map((w) => (
+                      <th
+                        key={w}
+                        colSpan={2}
+                        className="text-center py-2 px-2 font-normal border-l border-stone-800"
+                      >
+                        {w}
+                      </th>
+                    ))}
+                  </tr>
+                  <tr className="text-[10px] text-stone-600 border-b border-stone-800">
+                    <th></th>
+                    <th></th>
+                    {SUMMARY_WORKERS.map((w) => (
+                      <Fragment key={w}>
+                        <th className="text-right px-2 pb-1 font-normal border-l border-stone-800">+</th>
+                        <th className="text-right px-2 pb-1 font-normal">-</th>
+                      </Fragment>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {spreadsheetByDate.map((day) => (
+                    <Fragment key={day.date}>
+                      {day.rows.map((row, ridx) => (
                         <tr
-                          key={row.date}
-                          className="hover:bg-stone-950/50 cursor-pointer"
-                          onClick={() => setSummaryDetailRow(row)}
+                          key={ridx}
+                          className={
+                            "border-b border-stone-900 " +
+                            (row.matched ? "bg-amber-500/[0.03]" : "")
+                          }
                         >
-                          <td className="py-2 text-amber-400 hover:text-amber-300 underline decoration-dotted">
-                            {row.date}
-                            {!row.complete && (
-                              <span className="text-stone-600"> *</span>
-                            )}
+                          <td className="py-1.5 pr-3 text-stone-500 whitespace-nowrap">
+                            {ridx === 0 ? day.date : ""}
                           </td>
-                          {SUMMARY_WORKERS.map((w) => (
-                            <td
-                              key={w}
-                              className="py-2 text-right font-mono tabular-nums text-stone-300"
-                            >
-                              {row.byWorker[w] ? fmtPlain(row.byWorker[w].actual) : "-"}
-                            </td>
-                          ))}
-                          <td className="py-2 text-right font-mono tabular-nums text-stone-100">
-                            {row.totalActual === null ? "-" : fmtPlain(row.totalActual)}
+                          <td className="py-1.5 pr-3 text-stone-300 whitespace-nowrap">
+                            <span className="inline-flex items-center gap-1.5">
+                              {row.matchId && (
+                                <span
+                                  className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
+                                  style={{ backgroundColor: matchTagColor(row.matchId) }}
+                                  title={t("这条是配对记录的一部分", "Part of a paired transfer")}
+                                />
+                              )}
+                              {row.desc}
+                            </span>
                           </td>
-                          <td
-                            className={
-                              "py-2 text-right font-mono tabular-nums " +
-                              (row.totalLoss === null
-                                ? "text-stone-600"
-                                : over
-                                ? "text-rose-400"
-                                : "text-emerald-400")
-                            }
-                          >
-                            {row.totalLoss === null ? "-" : fmt(row.totalLoss)}
-                          </td>
+                          {SUMMARY_WORKERS.map((w) => {
+                            const amt = row.cells[w];
+                            return (
+                              <Fragment key={w}>
+                                <td className="py-1.5 px-2 text-right font-mono tabular-nums text-emerald-400 border-l border-stone-900">
+                                  {amt !== undefined && amt > 0 ? fmtPlain(amt) : ""}
+                                </td>
+                                <td className="py-1.5 px-2 text-right font-mono tabular-nums text-rose-400">
+                                  {amt !== undefined && amt < 0 ? fmtPlain(Math.abs(amt)) : ""}
+                                </td>
+                              </Fragment>
+                            );
+                          })}
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+                      ))}
+                      {day.summary && (
+                        <>
+                          <tr className="border-b border-stone-900 bg-stone-950/50">
+                            <td></td>
+                            <td className="py-1 pr-3 text-stone-500 text-xs">{t("要有", "Expected")}</td>
+                            {SUMMARY_WORKERS.map((w) => (
+                              <td
+                                key={w}
+                                colSpan={2}
+                                className="py-1 px-2 text-right font-mono tabular-nums text-stone-300 border-l border-stone-900"
+                              >
+                                {day.summary.byWorker[w] && day.summary.byWorker[w].expected !== null
+                                  ? fmtPlain(day.summary.byWorker[w].expected)
+                                  : "-"}
+                              </td>
+                            ))}
+                          </tr>
+                          <tr className="border-b border-stone-900 bg-stone-950/50">
+                            <td></td>
+                            <td className="py-1 pr-3 text-stone-500 text-xs">{t("实重", "Actual")}</td>
+                            {SUMMARY_WORKERS.map((w) => (
+                              <td
+                                key={w}
+                                colSpan={2}
+                                className="py-1 px-2 text-right font-mono tabular-nums text-stone-100 border-l border-stone-900"
+                              >
+                                {day.summary.byWorker[w] ? fmtPlain(day.summary.byWorker[w].actual) : "-"}
+                              </td>
+                            ))}
+                          </tr>
+                          <tr className="border-b-2 border-stone-800 bg-stone-950/50">
+                            <td></td>
+                            <td className="py-1 pr-3 text-stone-500 text-xs">{t("损耗", "Loss")}</td>
+                            {SUMMARY_WORKERS.map((w) => {
+                              const rec = day.summary.byWorker[w];
+                              const over =
+                                rec && rec.loss !== null && Math.abs(rec.loss) > LOSS_THRESHOLD;
+                              return (
+                                <td
+                                  key={w}
+                                  colSpan={2}
+                                  className={
+                                    "py-1 px-2 text-right font-mono tabular-nums border-l border-stone-900 " +
+                                    (!rec || rec.loss === null
+                                      ? "text-stone-600"
+                                      : over
+                                      ? "text-rose-400"
+                                      : "text-emerald-400")
+                                  }
+                                >
+                                  {rec && rec.loss !== null ? fmt(rec.loss) : "-"}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        </>
+                      )}
+                    </Fragment>
+                  ))}
+                </tbody>
+              </table>
             )}
             <p className="text-xs text-stone-600 mt-3">
               {t(
-                "* 标记的日期不是4个worker都有记录，合计要有/损耗留空（避免算错）；合计实重只加有记录的那几个。",
-                "* marked dates don't have all 4 workers recorded; total expected/loss is left blank to avoid a misleading number. Total actual only adds whichever workers reported."
+                "小圆点标记的行是配对过的转手记录；同一天配对的两边会合并成一行显示，不同天的话会分开两行，用同样颜色的圆点连起来看。",
+                "Rows with a colored dot are paired transfers. If both sides fall on the same day they're merged into one row; otherwise they show as two rows linked by the same dot color."
               )}
             </p>
           </div>
         </>
-      )}
-
-      {summaryDetailRow && (
-        <div
-          className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50"
-          onClick={() => setSummaryDetailRow(null)}
-        >
-          <div
-            className="bg-stone-900 border border-stone-700 rounded-2xl p-5 md:p-6 max-w-3xl w-full max-h-[88vh] overflow-y-auto"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-sm font-medium text-stone-200">
-                {summaryDetailRow.date}
-                {!summaryDetailRow.complete && (
-                  <span className="text-stone-600 text-xs ml-2">
-                    {t("（不是4个worker都有记录）", "(not all 4 workers recorded)")}
-                  </span>
-                )}
-              </h3>
-              <button
-                onClick={() => setSummaryDetailRow(null)}
-                className="text-stone-500 hover:text-stone-300 p-2 -m-2 rounded-lg active:bg-stone-800"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="overflow-x-auto mb-5">
-              <table className="w-full text-sm min-w-[480px]">
-                <thead>
-                  <tr className="text-xs text-stone-500 border-b border-stone-800">
-                    <th className="text-left py-1.5 font-normal"></th>
-                    {SUMMARY_WORKERS.map((w) => (
-                      <th key={w} className="text-right py-1.5 font-normal">
-                        {w}
-                      </th>
-                    ))}
-                    <th className="text-right py-1.5 font-normal text-stone-400">
-                      {t("合计", "Total")}
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-stone-800">
-                  <tr>
-                    <td className="py-1.5 text-stone-500">{t("上次实重", "Prev.")}</td>
-                    {SUMMARY_WORKERS.map((w) => (
-                      <td
-                        key={w}
-                        className="py-1.5 text-right font-mono tabular-nums text-stone-400"
-                      >
-                        {summaryDetailRow.byWorker[w] && summaryDetailRow.byWorker[w].prevWeight !== null
-                          ? fmtPlain(summaryDetailRow.byWorker[w].prevWeight)
-                          : "-"}
-                      </td>
-                    ))}
-                    <td className="py-1.5"></td>
-                  </tr>
-                  <tr>
-                    <td className="py-1.5 text-stone-500">{t("要有", "Expected")}</td>
-                    {SUMMARY_WORKERS.map((w) => (
-                      <td
-                        key={w}
-                        className="py-1.5 text-right font-mono tabular-nums text-stone-300"
-                      >
-                        {summaryDetailRow.byWorker[w] && summaryDetailRow.byWorker[w].expected !== null
-                          ? fmtPlain(summaryDetailRow.byWorker[w].expected)
-                          : "-"}
-                      </td>
-                    ))}
-                    <td className="py-1.5 text-right font-mono tabular-nums text-stone-300">
-                      {summaryDetailRow.totalExpected === null ? "-" : fmtPlain(summaryDetailRow.totalExpected)}
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-1.5 text-stone-500">{t("实重", "Actual")}</td>
-                    {SUMMARY_WORKERS.map((w) => (
-                      <td
-                        key={w}
-                        className="py-1.5 text-right font-mono tabular-nums text-stone-100"
-                      >
-                        {summaryDetailRow.byWorker[w] ? fmtPlain(summaryDetailRow.byWorker[w].actual) : "-"}
-                      </td>
-                    ))}
-                    <td className="py-1.5 text-right font-mono tabular-nums text-stone-100 font-medium">
-                      {summaryDetailRow.totalActual === null ? "-" : fmtPlain(summaryDetailRow.totalActual)}
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-1.5 text-stone-500">{t("损耗", "Loss")}</td>
-                    {SUMMARY_WORKERS.map((w) => {
-                      const rec = summaryDetailRow.byWorker[w];
-                      const over2 =
-                        rec && rec.loss !== null && Math.abs(rec.loss) > LOSS_THRESHOLD;
-                      return (
-                        <td
-                          key={w}
-                          className={
-                            "py-1.5 text-right font-mono tabular-nums " +
-                            (!rec || rec.loss === null
-                              ? "text-stone-600"
-                              : over2
-                              ? "text-rose-400"
-                              : "text-emerald-400")
-                          }
-                        >
-                          {rec && rec.loss !== null ? fmt(rec.loss) : "-"}
-                        </td>
-                      );
-                    })}
-                    <td
-                      className={
-                        "py-1.5 text-right font-mono tabular-nums font-medium " +
-                        (summaryDetailRow.totalLoss === null
-                          ? "text-stone-600"
-                          : Math.abs(summaryDetailRow.totalLoss) > LOSS_THRESHOLD
-                          ? "text-rose-400"
-                          : "text-emerald-400")
-                      }
-                    >
-                      {summaryDetailRow.totalLoss === null ? "-" : fmt(summaryDetailRow.totalLoss)}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            <h4 className="text-xs font-medium text-stone-400 mb-2">
-              {t("当天流水明细", "Flow entries for this day")}
-            </h4>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {SUMMARY_WORKERS.map((w) => {
-                const rec = summaryDetailRow.byWorker[w];
-                return (
-                  <div key={w} className="bg-stone-950 border border-stone-800 rounded-lg p-3">
-                    <p className="text-xs text-stone-400 font-medium mb-2">{w}</p>
-                    {!rec ? (
-                      <p className="text-xs text-stone-600">{t("这天没有记录", "No record this day")}</p>
-                    ) : rec.transactions && rec.transactions.length > 0 ? (
-                      <div className="divide-y divide-stone-900">
-                        {rec.transactions.map((tx) => (
-                          <div
-                            key={tx.id}
-                            className="flex items-center justify-between py-1.5 text-xs"
-                          >
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <span className="text-stone-300 truncate">{tx.desc}</span>
-                              {tx.dest && (
-                                <span className="text-stone-600 bg-stone-900 rounded px-1.5 py-0.5 shrink-0">
-                                  {tx.dest}
-                                </span>
-                              )}
-                            </div>
-                            <span
-                              className={
-                                "font-mono tabular-nums shrink-0 " +
-                                (tx.amount > 0 ? "text-emerald-400" : "text-rose-400")
-                              }
-                            >
-                              {fmt(tx.amount)} g
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="text-xs text-stone-600">
-                        {t("这天没有流水（可能已归档清空）", "No flow entries (may have been archived)")}
-                      </p>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
       )}
 
       {view === "workers" && (
