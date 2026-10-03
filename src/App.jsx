@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, Fragment } from "react";
+import { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import * as XLSX from "xlsx";
 import { supabase } from "./supabaseClient.js";
 import {
@@ -177,6 +177,11 @@ export default function GoldLedger() {
   }
 
   const [session, setSession] = useState(null);
+  // 多人同时使用时的同步保护：后台自动刷新不能和本地刚做的改动打架
+  const pendingSyncRef = useRef(0); // 还在往服务器同步的暂存流水数
+  const mutationRef = useRef(0); // 本地暂存流水的改动计数
+  const lastAutoRefreshRef = useRef(0);
+  const loadAllDataRef = useRef(null);
   const [role, setRole] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [loginEmail, setLoginEmail] = useState("");
@@ -344,7 +349,10 @@ export default function GoldLedger() {
     }));
   }
 
-  async function loadAllData() {
+  // silent=true 是后台自动刷新：不动输入框里的阈值草稿；
+  // 如果拉取期间本地刚好有新的改动，就丢掉这次结果，免得把刚记的那条冲掉
+  async function loadAllData({ silent = false } = {}) {
+    const startMutation = mutationRef.current;
     const { data: rows, error } = await supabase.rpc("get_ledger_rows", {
       p_keys: WORKERS,
     });
@@ -363,12 +371,16 @@ export default function GoldLedger() {
     });
     if (transErr) throw transErr;
     const nextTransfers = { ...emptyTransferData(), ...(transRaw || {}) };
+    if (silent && (mutationRef.current !== startMutation || pendingSyncRef.current > 0)) return;
     setData(next);
     setShipmentData(nextShipments);
     setTransferData(nextTransfers);
-    setThresholdDraft(String(nextTransfers.threshold ?? 0.05));
-    setShipThresholdDraft(String(nextShipments.threshold ?? 0.05));
+    if (!silent) {
+      setThresholdDraft(String(nextTransfers.threshold ?? 0.05));
+      setShipThresholdDraft(String(nextShipments.threshold ?? 0.05));
+    }
   }
+  loadAllDataRef.current = loadAllData;
 
   useEffect(() => {
     if (!session || !role) return;
@@ -387,6 +399,29 @@ export default function GoldLedger() {
       cancelled = true;
     };
   }, [session, role]);
+
+  // 自动刷新：切回页面时刷新一次，页面开着时每45秒刷新一次，
+  // 这样JJ和PD Lv2各用各的手机，也能及时看到对方刚记的流水和配对
+  useEffect(() => {
+    if (!session || !role || !ready) return;
+    function tick() {
+      if (document.visibilityState !== "visible") return;
+      if (pendingSyncRef.current > 0) return;
+      const now = Date.now();
+      if (now - lastAutoRefreshRef.current < 10000) return;
+      lastAutoRefreshRef.current = now;
+      const fn = loadAllDataRef.current;
+      if (fn) fn({ silent: true }).catch(() => {});
+    }
+    const id = setInterval(tick, 45000);
+    document.addEventListener("visibilitychange", tick);
+    window.addEventListener("focus", tick);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+      window.removeEventListener("focus", tick);
+    };
+  }, [session, role, ready]);
 
   useEffect(() => {
     setGoldbarConfirmed(false);
@@ -451,15 +486,6 @@ export default function GoldLedger() {
   const lossOver = loss !== null && Math.abs(loss) > LOSS_THRESHOLD;
 
   function addRow() {
-    if (recentUnmatchedCount > UNMATCHED_LIMIT) {
-      setRowError(
-        t(
-          `最近2天有 ${recentUnmatchedCount} 笔还没配对（超过${UNMATCHED_LIMIT}笔），请先去"转手核对"把配对补上，才能继续记流水`,
-          `${recentUnmatchedCount} unpaired entries in the last 2 days (over the limit of ${UNMATCHED_LIMIT}). Please pair them in "Transfers" before adding more flow entries.`
-        )
-      );
-      return;
-    }
     const amt = parseFloat(amountInput);
     if (!descInput.trim()) {
       setRowError(t("请填写描述", "Please enter a description"));
@@ -471,6 +497,15 @@ export default function GoldLedger() {
     }
     if (!destInput) {
       setRowError(t("请选择去向/来源", "Please choose a destination/source"));
+      return;
+    }
+    if (blockedByUnmatchedLimit(amt, destInput)) {
+      setRowError(
+        t(
+          `最近2天有 ${recentUnmatchedCount} 笔还没配对（超过${UNMATCHED_LIMIT}笔），请先去"转手核对"把配对补上，才能继续记流水`,
+          `${recentUnmatchedCount} unpaired entries in the last 2 days (over the limit of ${UNMATCHED_LIMIT}). Please pair them in "Transfers" before adding more flow entries.`
+        )
+      );
       return;
     }
     const item = { id: String(Date.now() + Math.random()), desc: descInput.trim(), amount: amt, dest: destInput };
@@ -487,18 +522,18 @@ export default function GoldLedger() {
 
   // 维修快捷录入：描述固定"维修"，去向/来源在 JJ / PD门市 之间选
   function addRepairRow() {
-    if (recentUnmatchedCount > UNMATCHED_LIMIT) {
+    const amt = parseFloat(repairAmount);
+    if (repairAmount === "" || Number.isNaN(amt) || amt === 0) {
+      setRepairError(t("请填写有效的加减数量（不能为0）", "Please enter a valid amount (can't be 0)"));
+      return;
+    }
+    if (blockedByUnmatchedLimit(amt, repairDest)) {
       setRepairError(
         t(
           `最近2天有 ${recentUnmatchedCount} 笔还没配对（超过${UNMATCHED_LIMIT}笔），请先去"转手核对"把配对补上，才能继续记流水`,
           `${recentUnmatchedCount} unpaired entries in the last 2 days (over the limit of ${UNMATCHED_LIMIT}). Please pair them in "Transfers" before adding more flow entries.`
         )
       );
-      return;
-    }
-    const amt = parseFloat(repairAmount);
-    if (repairAmount === "" || Number.isNaN(amt) || amt === 0) {
-      setRepairError(t("请填写有效的加减数量（不能为0）", "Please enter a valid amount (can't be 0)"));
       return;
     }
     const item = {
@@ -520,9 +555,16 @@ export default function GoldLedger() {
       const nextDrafts = { ...(workerData.drafts || {}), [date]: [...list, item] };
       return { ...d, [worker]: { ...workerData, drafts: nextDrafts } };
     });
-    supabase.rpc("upsert_draft_item", { p_worker: worker, p_date: date, p_item: item }).then(({ error }) => {
-      if (error) setSaveMsg("同步失败，检查网络（这条记录可能还没同步到其他设备）");
-    });
+    mutationRef.current += 1;
+    pendingSyncRef.current += 1;
+    supabase
+      .rpc("upsert_draft_item", { p_worker: worker, p_date: date, p_item: item })
+      .then(({ error }) => {
+        if (error) setSaveMsg("同步失败，检查网络（这条记录可能还没同步到其他设备）");
+      })
+      .finally(() => {
+        pendingSyncRef.current -= 1;
+      });
   }
 
   // 删一条暂存流水
@@ -536,10 +578,15 @@ export default function GoldLedger() {
       else nextDrafts[date] = filtered;
       return { ...d, [worker]: { ...workerData, drafts: nextDrafts } };
     });
+    mutationRef.current += 1;
+    pendingSyncRef.current += 1;
     supabase
       .rpc("remove_draft_item", { p_worker: worker, p_date: date, p_item_id: String(itemId) })
       .then(({ error }) => {
         if (error) setSaveMsg("同步失败，检查网络（这条记录可能还没同步到其他设备）");
+      })
+      .finally(() => {
+        pendingSyncRef.current -= 1;
       });
   }
 
@@ -553,6 +600,21 @@ export default function GoldLedger() {
     if (error) throw error;
   }
   const persistWorker = persistRow;
+
+  // 整行覆盖前先拉服务器上最新的那一行，再在它的基础上改，
+  // 避免用页面里已经过期的数据，把别人刚记的流水/配对冲掉
+  async function fetchRowFresh(key) {
+    if (WORKERS.includes(key)) {
+      const { data: rows, error } = await supabase.rpc("get_ledger_rows", { p_keys: [key] });
+      if (error) throw error;
+      const row = (rows || [])[0];
+      return { ...emptyWorkerData(), ...((row && row.data) || {}) };
+    }
+    const { data: raw, error } = await supabase.rpc("get_special_row", { p_key: key });
+    if (error) throw error;
+    const base = key === SPECIAL_KEYS.SHIPMENTS ? emptyShipmentData() : emptyTransferData();
+    return { ...base, ...(raw || {}) };
+  }
 
   async function refreshSpecialData(key, setter, emptyFn) {
     const { data: raw, error } = await supabase.rpc("get_special_row", { p_key: key });
@@ -605,8 +667,9 @@ export default function GoldLedger() {
     if (!isAdmin) return;
     const t = parseFloat(shipThresholdDraft);
     if (Number.isNaN(t) || t < 0) return;
-    const nextData = { ...shipmentData, threshold: t };
     try {
+      const fresh = await fetchRowFresh(SPECIAL_KEYS.SHIPMENTS);
+      const nextData = { ...fresh, threshold: t };
       await persistRow(SPECIAL_KEYS.SHIPMENTS, nextData);
       setShipmentData(nextData);
     } catch {
@@ -879,7 +942,6 @@ export default function GoldLedger() {
     [shipmentData.history]
   );
 
-
   // ---- 转手核对 ----
   async function refreshAll() {
     setRefreshingAll(true);
@@ -897,8 +959,9 @@ export default function GoldLedger() {
     if (!isAdmin) return;
     const t = parseFloat(thresholdDraft);
     if (Number.isNaN(t) || t < 0) return;
-    const nextData = { ...transferData, threshold: t };
     try {
+      const fresh = await fetchRowFresh(SPECIAL_KEYS.TRANSFERS);
+      const nextData = { ...fresh, threshold: t };
       await persistRow(SPECIAL_KEYS.TRANSFERS, nextData);
       setTransferData(nextData);
     } catch {
@@ -1043,6 +1106,12 @@ export default function GoldLedger() {
     return matchableItems.filter((i) => i.date >= cutoffStr).length;
   }, [matchableItems]);
   const UNMATCHED_LIMIT = 5;
+  // 超限时只放行"接收方"那一侧的转手记录（金额为正、来源是另一位 worker）。
+  // 这些正是配对需要的另一半；如果连它们也拦住，没人能补记，就永远配不上、整个流水卡死。
+  function blockedByUnmatchedLimit(amount, dest) {
+    if (recentUnmatchedCount <= UNMATCHED_LIMIT) return false;
+    return !(WORKERS.includes(dest) && amount > 0);
+  }
 
   function itemKey(item) {
     return `${item.worker}|${item.date}|${item.id}`;
@@ -1090,10 +1159,42 @@ export default function GoldLedger() {
   const selTotalIn = selectedIncomingList.reduce((s, i) => s + i.amount, 0);
   const selDiff = selTotalIn - selTotalOut;
 
-  function confirmMatch() {
+  async function confirmMatch() {
     if (selectedOutgoingList.length === 0 || selectedIncomingList.length === 0) return;
     setMatchSaving(true);
     setMatchMsg("");
+    // 提交前先看一眼服务器：这几条是不是刚被别人配对走了（两个账号同时配对同一批记录会重复）
+    try {
+      const { data: rawT, error: tErr } = await supabase.rpc("get_special_row", {
+        p_key: SPECIAL_KEYS.TRANSFERS,
+      });
+      if (!tErr) {
+        const fresh = { ...emptyTransferData(), ...(rawT || {}) };
+        const taken = new Set();
+        for (const r of fresh.history.filter((x) => x.kind === "match")) {
+          if (r.outgoing) r.outgoing.forEach((i) => taken.add(i.itemId));
+          else if (r.itemIdA) taken.add(r.itemIdA);
+          if (r.incoming) r.incoming.forEach((i) => taken.add(i.itemId));
+          else if (r.itemIdB) taken.add(r.itemIdB);
+        }
+        const clash = [...selectedOutgoingList, ...selectedIncomingList].some((i) => taken.has(i.id));
+        if (clash) {
+          setTransferData(fresh);
+          setSelectedOutgoingKeys(new Set());
+          setSelectedIncomingKeys(new Set());
+          setMatchMsg(
+            t(
+              "其中有记录刚刚被别人配对了，已刷新，请重新选择",
+              "Some of these entries were just paired by someone else. Refreshed — please select again."
+            )
+          );
+          setMatchSaving(false);
+          return;
+        }
+      }
+    } catch {
+      // 校验本身失败就照常配对
+    }
     const record = {
       id: String(Date.now() + Math.random()),
       kind: "match",
@@ -1198,11 +1299,20 @@ export default function GoldLedger() {
     if (!isAdmin) return;
     if (cur.history.length === 0) return;
     setUndoing(true);
-    const newHistory = recomputeChain(cur.history.slice(0, -1));
-    const prevWeight =
-      newHistory.length > 0 ? newHistory[newHistory.length - 1].actual : null;
-    const nextWorkerData = { lastWeight: prevWeight, history: newHistory, drafts: cur.drafts || {} };
     try {
+      // 用服务器上最新的数据来撤销，并确认要撤销的还是管理员刚才看到的那一天
+      const fresh = await fetchRowFresh(activeWorker);
+      const shownLast = cur.history[cur.history.length - 1];
+      const freshLast = fresh.history[fresh.history.length - 1];
+      if (!freshLast || freshLast.date !== shownLast.date) {
+        setData((d) => ({ ...d, [activeWorker]: fresh }));
+        setSaveMsg("这条账刚被别人更新过，已刷新，请确认最新一天后再撤销");
+        return;
+      }
+      const newHistory = recomputeChain(fresh.history.slice(0, -1));
+      const prevWeight =
+        newHistory.length > 0 ? newHistory[newHistory.length - 1].actual : null;
+      const nextWorkerData = { ...fresh, lastWeight: prevWeight, history: newHistory };
       await persistWorker(activeWorker, nextWorkerData);
       setData((d) => ({ ...d, [activeWorker]: nextWorkerData }));
       setSaveMsg("已撤销最近一天的记录");
@@ -1243,15 +1353,6 @@ export default function GoldLedger() {
   }
 
   function addDetailRow() {
-    if (recentUnmatchedCount > UNMATCHED_LIMIT) {
-      setDetailRowError(
-        t(
-          `最近2天有 ${recentUnmatchedCount} 笔还没配对（超过${UNMATCHED_LIMIT}笔），请先去"转手核对"把配对补上，才能继续记流水`,
-          `${recentUnmatchedCount} unpaired entries in the last 2 days (over the limit of ${UNMATCHED_LIMIT}). Please pair them in "Transfers" before adding more flow entries.`
-        )
-      );
-      return;
-    }
     const amt = parseFloat(detailAmount);
     if (!detailDesc.trim()) {
       setDetailRowError(t("请填写描述", "Please enter a description"));
@@ -1263,6 +1364,15 @@ export default function GoldLedger() {
     }
     if (!detailDest) {
       setDetailRowError(t("请选择去向/来源", "Please choose a destination/source"));
+      return;
+    }
+    if (blockedByUnmatchedLimit(amt, detailDest)) {
+      setDetailRowError(
+        t(
+          `最近2天有 ${recentUnmatchedCount} 笔还没配对（超过${UNMATCHED_LIMIT}笔），请先去"转手核对"把配对补上，才能继续记流水`,
+          `${recentUnmatchedCount} unpaired entries in the last 2 days (over the limit of ${UNMATCHED_LIMIT}). Please pair them in "Transfers" before adding more flow entries.`
+        )
+      );
       return;
     }
     setEditTransactions((list) => [
@@ -1506,9 +1616,10 @@ export default function GoldLedger() {
     setClearing(true);
     try {
       const nextDataLocal = { ...data };
-      const toPersist = [];
       for (const w of WORKERS) {
-        const hist = data[w]?.history || [];
+        // 每条账都先拉最新的再改，不用页面里可能已过期的数据整行覆盖
+        const fresh = await fetchRowFresh(w);
+        const hist = fresh.history || [];
         let changed = false;
         const newHist = hist.map((r) => {
           if (!r.exported && pendingExportKeys.has(`${w}__${r.date}`)) {
@@ -1518,13 +1629,10 @@ export default function GoldLedger() {
           return r;
         });
         if (changed) {
-          const nextWorkerData = { lastWeight: data[w].lastWeight, history: newHist, drafts: data[w].drafts || {} };
+          const nextWorkerData = { ...fresh, history: newHist };
+          await persistWorker(w, nextWorkerData);
           nextDataLocal[w] = nextWorkerData;
-          toPersist.push({ worker: w, data: nextWorkerData });
         }
-      }
-      for (const item of toPersist) {
-        await persistWorker(item.worker, item.data);
       }
       setData(nextDataLocal);
       setPendingExportKeys(null);
@@ -2217,8 +2325,8 @@ export default function GoldLedger() {
           <div className="bg-rose-500/10 border border-rose-500/40 rounded-lg p-3 mb-3 text-xs text-rose-400 flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 shrink-0" />
             {t(
-              `最近2天有 ${recentUnmatchedCount} 笔转手记录还没配对（超过${UNMATCHED_LIMIT}笔上限），暂时不能加新流水，去"转手核对"页把配对补上`,
-              `${recentUnmatchedCount} transfer entries from the last 2 days are still unpaired (over the limit of ${UNMATCHED_LIMIT}). New flow entries are blocked — go to "Transfers" to pair them first.`
+              `最近2天有 ${recentUnmatchedCount} 笔转手记录还没配对（超过${UNMATCHED_LIMIT}笔上限）。现在只能先记"收到对方转手"的那一边（金额为正、来源选对方），其它新流水要等配对后才能记，去"转手核对"页配对`,
+              `${recentUnmatchedCount} transfer entries from the last 2 days are still unpaired (over the limit of ${UNMATCHED_LIMIT}). You can still record the receiving side of a transfer (positive amount, source = the other worker); other new entries are blocked until you pair — go to "Transfers".`
             )}
           </div>
         )}
@@ -3318,7 +3426,6 @@ export default function GoldLedger() {
         </>
       )}
 
-
       {view === "transfers" && (
         <>
           <div className="flex justify-end mb-6">
@@ -3348,8 +3455,8 @@ export default function GoldLedger() {
                   <AlertTriangle className="w-4 h-4 shrink-0" />
                 )}
                 {t(
-                  `最近2天未配对：${recentUnmatchedCount} / ${UNMATCHED_LIMIT}${recentUnmatchedCount > UNMATCHED_LIMIT ? "——已超过限制，暂时不能记新流水，先配对" : ""}`,
-                  `Unpaired in the last 2 days: ${recentUnmatchedCount} / ${UNMATCHED_LIMIT}${recentUnmatchedCount > UNMATCHED_LIMIT ? " — over the limit, new flow entries are blocked until you pair some" : ""}`
+                  `最近2天未配对：${recentUnmatchedCount} / ${UNMATCHED_LIMIT}${recentUnmatchedCount > UNMATCHED_LIMIT ? "——已超过限制，只能先记收到对方转手的那一边，其它流水先配对再记" : ""}`,
+                  `Unpaired in the last 2 days: ${recentUnmatchedCount} / ${UNMATCHED_LIMIT}${recentUnmatchedCount > UNMATCHED_LIMIT ? " — over the limit: only the receiving side of a transfer can be recorded until you pair some" : ""}`
                 )}
               </div>
 
