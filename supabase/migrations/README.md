@@ -1,1 +1,2 @@
 Run 20261005_transfer_maintenance.sql, then 20261005_transfer_issues.sql against the inspected production schema. Do not run supabase_setup.sql. See ../../TRANSFER_MAINTENANCE.md for deployment, permissions, weekly maintenance, and rollback.
+Then run 20261006_ledger_safety.sql and 20261007_transfer_lanes.sql (adds lanes C/D and next-day HIGH for lane B), then supabase/ops/20261007_employee_scope.sql to bind account scopes. Rollback: supabase/rollback/20261007_transfer_lanes.sql.

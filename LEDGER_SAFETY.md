@@ -4,8 +4,9 @@
 
 ## 员工范围
 
-- `jj@jjstore.local`：只能录入、删除暂存和修改 JJ 最近三天记录。
-- `pdlv2@jjstore.local`：只能录入、删除暂存和修改 PD Lv1 / PD Lv2 最近三天记录。
+- `jj@jjstore.local`：只能录入、删除暂存和修改 JJ、倒模 最近三天记录。
+- `pdlv2@jjstore.local`：只能录入、删除暂存和修改 PD Lv1 / PD Lv2 / Lv1倒模 / Lv1车花 最近三天记录。
+- 范围由 `supabase/ops/20261007_employee_scope.sql` 绑定（可重复运行）。
 - Admin 保留全部部门权限。其他普通账号未分配范围时不能写入。
 - 范围存放于私有 `employee_workers` 表，由 `transfer_set_employee_workers` 管理；前端通过 `ledger_get_worker_scope` 获取。邮箱不作为客户端权限依据。
 - 总览保持现有只读展示；部门切换与出货来源仅显示有录入权限的部门。

@@ -32,6 +32,7 @@ if (process.env.TRANSFER_PRODUCTION_FIXTURE) {
 const before=(await q('select worker,data,updated_at from gold_ledger order by worker')).rows;
 await db.exec(fs.readFileSync(path.join(root,'supabase/migrations/20261005_transfer_maintenance.sql'),'utf8'));
 await db.exec(fs.readFileSync(path.join(root,'supabase/migrations/20261005_transfer_issues.sql'),'utf8'));
+await db.exec(fs.readFileSync(path.join(root,'supabase/migrations/20261007_transfer_lanes.sql'),'utf8'));
 await test('production JSON, historical match IDs and updated_at unchanged by migration',async()=>{
   assert.deepEqual((await q('select worker,data,updated_at from gold_ledger order by worker')).rows,before);
 });
@@ -233,6 +234,36 @@ await test('receive deadline configurable, late receipt never clears red',async(
   assert.equal(resolved.is_red,false);assert.ok(resolved.events.some(x=>x.event_type==='possible_resolution_found'));
   await add('PD Lv1','fresh-out',-444.44,'PD Lv2','2026-01-25');
   scan=await rpc('transfer_scan_receive_exceptions',[false,'B']);assert.ok(scan.items.some(x=>x.item_id==='fresh-out'&&x.severity==='YELLOW'&&x.issue===null));
+});
+await test('lanes C/D (JJ with Lv1倒模/Lv1车花) and next-day B matching',async()=>{
+  const sh=(d,n)=>{const x=new Date(d+'T12:00:00Z');x.setUTCDate(x.getUTCDate()+n);return x.toISOString().slice(0,10)};
+  await q("select set_config('request.jwt.claim.sub',$1,false)",[ADMIN]);
+  const base=sh(day,-40); // isolated date window, other tests' items are not in range
+  const sc=[['PD Lv2',0,'PD Lv1',0,'B','HIGH'],['PD Lv2',-1,'PD Lv1',0,'B','HIGH'],['PD Lv1',-1,'PD Lv2',0,'B','HIGH'],
+    ['PD Lv2',-2,'PD Lv1',0,'B','MEDIUM'],['PD Lv2',-3,'PD Lv1',0,'B',null],['JJ',-1,'PD Lv2',0,'A','MEDIUM'],
+    ['JJ',0,'Lv1倒模',0,'C','MEDIUM'],['Lv1倒模',-1,'JJ',0,'C','MEDIUM'],['JJ',0,'Lv1车花',0,'D','MEDIUM'],['Lv1车花',-1,'JJ',0,'D','MEDIUM']];
+  const W=[41.37,63.91,88.07,117.43,152.29,29.53,71.19,97.61,133.07,166.83];
+  for(let k=0;k<sc.length;k++){const [ow,od,iw,id_]=sc[k];
+    await add(ow,`L${k}o`,-W[k],iw,sh(base,od)); await add(iw,`L${k}i`,W[k],ow,sh(base,id_));}
+  const lanes=Object.fromEntries((await q("select item_id,lane from transfer_get_unmatched($1::date-10,$1::date,null,null,'all') where item_id like 'L%'",[base])).rows.map(r=>[r.item_id,r.lane]));
+  const r=await rpc('transfer_find_candidates',[sh(base,-10),base,null,null,0.05,2,200,'all']);
+  const found=new Map(r.candidates.map(c=>[c.outgoing_ids[0],c]));
+  sc.forEach(([,, , ,lane,conf],k)=>{
+    assert.equal(lanes[`L${k}o`],lane,`lane ${k}`);
+    const c=found.get(`L${k}o`);
+    if(conf===null) assert.equal(c,undefined,`case ${k} should not match`); else {assert.ok(c,`case ${k} found`);assert.equal(c.confidence,conf,`conf ${k}`);}
+  });
+  const prim=(await q("select distinct lane from transfer_get_unmatched($1::date-10,$1::date,null,null,'primary') where item_id like 'L%'",[base])).rows.map(x=>x.lane).sort();
+  assert.deepEqual(prim,['A','B','C','D']);
+  const bl=await rpc('transfer_get_unmatched_by_lane',[sh(base,-10),base]);
+  assert.ok(bl.C&&bl.D);
+  await assert.rejects(()=>rpc('transfer_find_candidates',[sh(base,-10),base,null,null,0.05,3,200,'all']),/invalid_candidate_parameters/);
+});
+await test('lane migration rollback restores original lanes',async()=>{
+  await db.exec(fs.readFileSync(path.join(root,'supabase/rollback/20261007_transfer_lanes.sql'),'utf8'));
+  const n=(await q("select count(*)::int n from transfer_get_unmatched(current_date-60,current_date,null,null,'all') where item_id like 'L%' and lane='other'")).rows[0].n;
+  assert.ok(n>0);
+  await db.exec(fs.readFileSync(path.join(root,'supabase/migrations/20261007_transfer_lanes.sql'),'utf8'));
 });
 await test('rollback preserves all audit and ledger data',async()=>{
   const ledger=(await q('select worker,data,updated_at from gold_ledger order by worker')).rows;

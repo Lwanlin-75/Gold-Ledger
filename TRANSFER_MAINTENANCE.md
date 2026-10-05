@@ -51,7 +51,7 @@ const open = await supabase.rpc('transfer_get_open_issues', {p_status:'STAFF_REP
 const overdue = await supabase.rpc('transfer_scan_receive_exceptions', {p_create_issues:false});
 ```
 
-Lane B 优先同一天、正负互反、近似重量；无重叠的同日 1:1 为 HIGH。上楼/下楼仅辅助评分。Lane A 即使准确也保守返回 MEDIUM。任何 item 存在多种组合，返回 AMBIGUOUS。**description 不作为排除条件**。
+Lane A：JJ↔PD Lv2；Lane B：PD Lv1↔PD Lv2；Lane C：JJ↔Lv1倒模；Lane D：JJ↔Lv1车花（`20261007_transfer_lanes.sql`）。Lane B 正负互反、近似重量；同日或隔天（相隔≤1天）的无重叠 1:1 为 HIGH，相隔2天为 MEDIUM，超过2天不自动配对。A/C/D 即使准确也保守返回 MEDIUM。上楼/下楼仅辅助评分。Lane A 即使准确也保守返回 MEDIUM。任何 item 存在多种组合，返回 AMBIGUOUS。**description 不作为排除条件**。
 
 候选原生搜索 1:1、1:2、2:1、1:3、3:1。Preview/Apply 支持任意有限 1:N/N:1/N:N。候选暂不枚举 N:N，避免组合爆炸。每个有向 Worker Pair 每侧默认只搜索最近 20 个 item，最大 30，每侧最大 3 个，日期跨度最大 2 天。可缩小日期范围或分方向查询覆盖更多数据；不能把有限搜索结果视为完整答案。
 
@@ -87,8 +87,8 @@ await supabase.rpc('transfer_resolve_issue', {
 
 | RPC | 参数与默认值 | 返回 |
 |---|---|---|
-| transfer_get_unmatched | start_date/end_date/worker/counterparty=null, lane='primary'（A/B/other/all） | 原始行：item_id,date,created_at,worker,counterparty,direction,amount,absolute_amount,description,matched,match_id,archived,lane |
-| transfer_get_unmatched_by_lane | start_date/end_date=null | A/B/other 数组 |
+| transfer_get_unmatched | start_date/end_date/worker/counterparty=null, lane='primary'（A/B/C/D/other/all；primary=A+B+C+D） | 原始行：item_id,date,created_at,worker,counterparty,direction,amount,absolute_amount,description,matched,match_id,archived,lane |
+| transfer_get_unmatched_by_lane | start_date/end_date=null | A/B/C/D/other 数组 |
 | transfer_maintenance_summary | start_date/end_date=null | 数量、送出/收到、最老日期、>7天、Worker Pair、Lane、历史冲突数 |
 | transfer_preview_match | outgoing_ids text[], incoming_ids text[], max_date_span=7（0..365） | valid,reason,精确重量、日期跨度、方向、action |
 | transfer_apply_match | 同 Preview + note=null, source='maintenance' | match_id、重量等；source允许 manual_ui/maintenance/auto（仅元数据，不代表自动执行） |

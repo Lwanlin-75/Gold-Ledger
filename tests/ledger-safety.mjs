@@ -19,11 +19,11 @@ create table gold_ledger(worker text primary key,data jsonb not null,updated_at 
 alter table gold_ledger enable row level security;
 insert into profiles(id,role) values('${ADMIN}','admin'),('${JJ}','user'),('${PD}','user');`);
 await db.exec(fs.readFileSync(path.join(root,'tests/production-functions.sql'),'utf8'));
-for(const migration of ['20261005_transfer_maintenance.sql','20261005_transfer_issues.sql','20261006_ledger_safety.sql'])
+for(const migration of ['20261005_transfer_maintenance.sql','20261005_transfer_issues.sql','20261006_ledger_safety.sql','20261007_transfer_lanes.sql'])
   await db.exec(fs.readFileSync(path.join(root,'supabase/migrations',migration),'utf8'));
 await actor(ADMIN);
-await rpc('transfer_set_employee_workers',[JJ,['JJ']]);
-await rpc('transfer_set_employee_workers',[PD,['PD Lv1','PD Lv2']]);
+await rpc('transfer_set_employee_workers',[JJ,['JJ','倒模']]);
+await rpc('transfer_set_employee_workers',[PD,['PD Lv1','PD Lv2','Lv1倒模','Lv1车花']]);
 const day=(await q('select transfer_maintenance.business_today()::text as day')).rows[0].day;
 const yesterday=shiftDay(day,-1);
 const item=(id,amount,dest='老板')=>({id,amount,dest,desc:id});
@@ -37,14 +37,15 @@ await test('Malaysia midnight, date shifts and synchronous settlement gate',asyn
   assert.equal(gate.canWrite(),false);gate.recovered();assert.equal(gate.canWrite(),true);
 });
 await test('JJ and PD scopes enforced on all Worker write RPCs; admin retains all',async()=>{
-  await actor(JJ);assert.deepEqual(await rpc('ledger_get_worker_scope'),['JJ']);await add('JJ','jj-allowed',-1);
-  for(const worker of ['PD Lv1','PD Lv2','倒模']) {
+  await actor(JJ);assert.deepEqual(await rpc('ledger_get_worker_scope'),['JJ','倒模']);await add('JJ','jj-allowed',-1);await add('倒模','jj-daomo-allowed',-1);
+  for(const worker of ['PD Lv1','PD Lv2','Lv1倒模','Lv1车花']) {
     await assert.rejects(add(worker,'denied-'+worker,-1),/worker_scope_denied/);
     await assert.rejects(rpc('remove_draft_item',[worker,day,'x']),/worker_scope_denied/);
     await assert.rejects(rpc('save_day',[worker,day,10]),/worker_scope_denied/);
     await assert.rejects(rpc('edit_history_record',[worker,day,day,[],10]),/worker_scope_denied/);
   }
-  await actor(PD);assert.deepEqual(await rpc('ledger_get_worker_scope'),['PD Lv1','PD Lv2']);
+  await actor(PD);assert.deepEqual(await rpc('ledger_get_worker_scope'),['Lv1倒模','Lv1车花','PD Lv1','PD Lv2']);
+  await add('Lv1倒模','pd-daomo-allowed',1);await add('Lv1车花','pd-chehua-allowed',1);await assert.rejects(add('倒模','pd-denied2',1),/worker_scope_denied/);
   await add('PD Lv1','pd1-allowed',1);await add('PD Lv2','pd2-allowed',1);
   await assert.rejects(add('JJ','pd-denied',1),/worker_scope_denied/);
   await actor(ADMIN);assert.equal((await rpc('ledger_get_worker_scope')).length,6);

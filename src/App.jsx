@@ -1256,14 +1256,19 @@ export default function GoldLedger() {
     }
   }
 
-  const recentHistory = useMemo(
-    () =>
-      cur.history
-        .map((r, i) => ({ ...r, _idx: i }))
-        .slice(-14)
-        .reverse(),
+  const [historyMonth, setHistoryMonth] = useState("recent"); // admin: "recent" | "all" | "YYYY-MM"
+  const historyMonths = useMemo(
+    () => [...new Set(cur.history.map((r) => String(r.date).slice(0, 7)))].sort().reverse(),
     [cur.history]
   );
+  const recentHistory = useMemo(() => {
+    const all = cur.history.map((r, i) => ({ ...r, _idx: i }));
+    let rows;
+    if (!isAdmin || historyMonth === "recent") rows = all.slice(-14);
+    else if (historyMonth === "all") rows = all;
+    else rows = all.filter((r) => String(r.date).slice(0, 7) === historyMonth);
+    return rows.reverse();
+  }, [cur.history, isAdmin, historyMonth]);
   const cumulativeLoss = cur.history.reduce((s, r) => s + (r.loss || 0), 0);
 
   // ---- 详情弹窗 ----
@@ -2492,8 +2497,21 @@ export default function GoldLedger() {
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-medium text-stone-300 flex items-center gap-2">
             <History className="w-4 h-4" />
-            {t(`历史记录（最近 ${recentHistory.length} 天，点日期看详情）`, `History (last ${recentHistory.length} days, click a date for details)`)}
+            {t(`历史记录（${isAdmin && historyMonth !== "recent" ? (historyMonth === "all" ? "全部" : historyMonth) : "最近"} ${recentHistory.length} 天，点日期看详情）`, `History (${isAdmin && historyMonth !== "recent" ? (historyMonth === "all" ? "all" : historyMonth) : "last"} ${recentHistory.length} days, click a date for details)`)}
           </h2>
+          {isAdmin && (
+            <select
+              value={historyMonth}
+              onChange={(e) => setHistoryMonth(e.target.value)}
+              className="text-xs bg-stone-800 border border-stone-700 text-stone-300 rounded-lg px-2 py-1.5"
+            >
+              <option value="recent">{t("最近14天", "Last 14 days")}</option>
+              <option value="all">{t("全部日期", "All dates")}</option>
+              {historyMonths.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          )}
           {cur.history.length > 0 && (
             <div className="flex items-center gap-2">
               {confirmUndo && (
