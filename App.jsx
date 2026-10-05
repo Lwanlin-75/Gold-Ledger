@@ -1,3 +1,4 @@
+// DEPRECATED: unused historical version. Production entry is src/App.jsx. See LEDGER_SAFETY.md.
 import { useState, useEffect, useMemo } from "react";
 import * as XLSX from "xlsx";
 import { supabase } from "./supabaseClient.js";
@@ -2407,3 +2408,4 @@ export default function GoldLedger() {
     </div>
   );
 }
+

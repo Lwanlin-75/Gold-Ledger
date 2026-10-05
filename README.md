@@ -1,11 +1,10 @@
 # 金重对账
 
-## 第一步：建数据库表（必须先做）
+## 当前数据库维护
 
-1. 打开你的 Supabase 项目
-2. 左边栏点 **SQL Editor** -> **New query**
-3. 打开这个项目里的 `supabase_setup.sql` 文件，把内容全部复制贴进去
-4. 点 **Run**，看到成功提示就行了
+不要执行旧的 supabase_setup.sql。生产数据库使用 Auth、profiles、RPC 与私有维护表，现有项目升级请阅读 [TRANSFER_MAINTENANCE.md](TRANSFER_MAINTENANCE.md) 和 [LEDGER_SAFETY.md](LEDGER_SAFETY.md)，按 supabase/migrations 顺序执行。迁移不是空数据库初始化器。
+
+真正的应用入口是 src/App.jsx；根目录 App.jsx 已弃用。普通员工录入范围由数据库校验，配对由管理员 / AI 每周处理。
 
 ## 第二步：部署到 Vercel
 
@@ -45,3 +44,4 @@ npm run dev
 ```
 
 会给你一个本地网址（通常是 http://localhost:5173），打开就能用，这时候数据已经是真的存进 Supabase 数据库了。
+

@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node tests/transfer-maintenance.mjs"
+    "test": "node tests/transfer-maintenance.mjs && node tests/ledger-safety.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",

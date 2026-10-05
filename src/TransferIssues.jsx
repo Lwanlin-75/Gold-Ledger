@@ -2,10 +2,10 @@ import { useEffect, useState, useCallback } from 'react';
 import { supabase } from './supabaseClient.js';
 
 // A small, permission-filtered notice area. Match and resolution remain administrator actions.
-export default function TransferIssues({ worker, lang }) {
+export default function TransferIssues({ worker, lang, pinned = false }) {
   const [issues, setIssues] = useState([]);
   const [waiting, setWaiting] = useState([]);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(pinned);
   const [comments, setComments] = useState({});
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState('');
@@ -34,15 +34,15 @@ export default function TransferIssues({ worker, lang }) {
     const load = async () => {
       const { data, error: failure } = await supabase.rpc('transfer_get_worker_transfer_notices', { p_worker: worker });
       if (!active) return;
-      setIssues(failure ? [] : data?.issues || []);setWaiting(failure ? [] : data?.waiting || []);
+      if (!failure) { setIssues(data?.issues || []);setWaiting(data?.waiting || []); }
       setError(failure ? (lang === 'en' ? 'Issue notices could not be loaded. Retry.' : '异常公告加载失败，请重试。') : '');
     };
-    setIssues([]);setWaiting([]);setExpanded(false);load();
+    setIssues([]);setWaiting([]);setExpanded(pinned);load();
     const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 60000);
     const onFocus = () => load();
     window.addEventListener('focus', onFocus);
     return () => { active = false;clearInterval(timer);window.removeEventListener('focus', onFocus); };
-  }, [worker, lang]);
+  }, [worker, lang, pinned]);
   async function submit(issue, checked) {
     const text = (comments[issue.id] || '').trim();
     if (!text || busy) return;
@@ -63,13 +63,13 @@ export default function TransferIssues({ worker, lang }) {
     <section className={`mb-4 rounded-lg border p-3 text-xs ${red ? 'border-rose-500/40 bg-rose-500/10 text-rose-300' : 'border-amber-500/30 bg-amber-500/10 text-amber-300'}`}>
       <div className="flex items-center justify-between gap-2">
         <button onClick={() => setExpanded(value => !value)} className="font-medium text-left">
-          {t('转手异常 / 待处理', 'Transfer issues / follow-up')} · {worker} ({issues.length}) {waiting.length > 0 && `· ${t("等待接收", "Awaiting receipt")} ${waiting.length}`}
+          {pinned && t('置顶 · ', 'Pinned · ')}{t('转手异常 / 待处理', 'Transfer issues / follow-up')} · {worker || t('全部部门', 'All departments')} ({issues.length}) {waiting.length > 0 && `· ${t("等待接收", "Awaiting receipt")} ${waiting.length}`}
         </button>
         <button onClick={refresh} disabled={!!busy}>{t('刷新', 'Refresh')}</button>
       </div>
       {error && <p className="mt-2" role="alert">{error}</p>}
       {expanded && waiting.map(entry => <p key={entry.item_id} className="mt-2 text-amber-300">{entry.worker} → {entry.counterparty} · {entry.date} · {Math.abs(Number(entry.amount)).toFixed(2)}g · {entry.overdue ? t("已超过等待期限，待管理员检查", "Receive deadline exceeded; awaiting admin review") : t("等待对方补接收记录", "Awaiting receiving entry")}</p>)}
-      {expanded && issues.map(issue => (
+      {expanded && [...issues].sort((a,b) => Number(b.is_red)-Number(a.is_red)).map(issue => (
         <div key={issue.id} className="mt-3 border-t border-stone-700 pt-3">
           <p className="font-medium">{issue.assigned_workers.join(' ↔ ')} · {typeLabels[issue.issue_type] || issue.issue_type} · {statusLabels[issue.status] || issue.status}</p>
           <p className="mt-1">{[...new Set(issue.initial_items.map(item => item.date))].join(' / ')} · {t('转出', 'Sent')}: {Number(issue.total_out).toFixed(2)}g · {t('收到', 'Received')}: {Number(issue.total_in).toFixed(2)}g · {t('当时差异', 'Initial difference')}: {Math.abs(Number(issue.difference)).toFixed(2)}g</p>
