@@ -758,6 +758,7 @@ export default function GoldLedger() {
   }
 
   function openShipConfirm(record) {
+    if (!isAdmin || !writeGate.current.canWrite()) return;
     setShipConfirmingId(record.id);
     setShipConfirmDate(todayStr());
     setShipConfirmWeight("");
@@ -766,6 +767,7 @@ export default function GoldLedger() {
   }
 
   async function confirmShipment() {
+    if (!isAdmin || !writeGate.current.canWrite()) return;
     setShipConfirmError("");
     const record = shipmentData.history.find((r) => r.id === shipConfirmingId);
     if (!record) return;
@@ -3140,6 +3142,7 @@ export default function GoldLedger() {
                         </span>
                         <button
                           onClick={() => deleteShipmentRecord(r)}
+                          disabled={!isAdmin}
                           className="text-stone-600 hover:text-rose-400 p-2 -m-2 rounded-lg active:bg-stone-800"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -3231,6 +3234,7 @@ export default function GoldLedger() {
                     ) : (
                       <button
                         onClick={() => openShipConfirm(r)}
+                        disabled={!isAdmin}
                         className="mt-2 text-xs px-3 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
                       >
                         {SHIP_TO} {t("确认接收", "confirm receipt")}
@@ -3257,6 +3261,7 @@ export default function GoldLedger() {
               />
               <button
                 onClick={saveShipThreshold}
+                disabled={!isAdmin}
                 className="text-xs px-3 py-2 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
               >
                 {t("更新阈值", "Update threshold")}
@@ -3325,6 +3330,7 @@ export default function GoldLedger() {
                           <td className="py-2 text-right">
                             <button
                               onClick={() => deleteShipmentRecord(r)}
+                              disabled={!isAdmin}
                               className="text-stone-600 hover:text-rose-400 p-2 -m-2 rounded-lg active:bg-stone-800"
                             >
                               <Trash2 className="w-4 h-4" />
@@ -3599,6 +3605,7 @@ export default function GoldLedger() {
                   />
                   <button
                     onClick={saveThreshold}
+                    disabled={!isAdmin}
                     className="text-xs px-3 py-2 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 hover:text-stone-100"
                   >
                     {t("更新阈值", "Update threshold")}
