@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import * as XLSX from "xlsx";
 import { supabase } from "./supabaseClient.js";
 import TransferIssues from "./TransferIssues.jsx";
+import { todayInMalaysia, shiftDay, WriteGate } from "./ledgerSafety.js";
 import {
   Scale,
   Plus,
@@ -113,7 +114,7 @@ function denomBreakdown(qtyObj, denomList) {
 }
 
 function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  return todayInMalaysia();
 }
 
 function fmt(n) {
@@ -179,6 +180,10 @@ export default function GoldLedger() {
 
   const [session, setSession] = useState(null);
   // 多人同时使用时的同步保护：后台自动刷新不能和本地刚做的改动打架
+  const writeGate = useRef(new WriteGate());
+  const [syncPending, setSyncPending] = useState(0);
+  const [lastSynced, setLastSynced] = useState(null);
+  const [workerScope, setWorkerScope] = useState([]);
   const pendingSyncRef = useRef(0); // 还在往服务器同步的暂存流水数
   const mutationRef = useRef(0); // 本地暂存流水的改动计数
   const lastAutoRefreshRef = useRef(0);
@@ -284,6 +289,36 @@ export default function GoldLedger() {
   const [deletingUserId, setDeletingUserId] = useState(null);
 
   const isAdmin = role === "admin";
+  const editableWorkers = isAdmin ? WORKERS : WORKERS.filter(w => workerScope.includes(w));
+  const editableShipWorkers = SHIP_WORKERS.filter(w => editableWorkers.includes(w));
+  const writeBlocked = !ready || Boolean(loadError) || syncPending > 0 || (!isAdmin && editableWorkers.length === 0);
+
+  async function ledgerWrite(name, args) {
+    writeGate.current.begin();
+    pendingSyncRef.current++;
+    mutationRef.current++;
+    setSyncPending(pendingSyncRef.current);
+    let success = false;
+    try {
+      const result = await supabase.rpc(name, args);
+      if (result.error) throw result.error;
+      await loadAllData({ silent: true, ownWrite: true });
+      success = true;
+      return result;
+    } catch (error) {
+      setLoadError(t("写入未确认，已暂停操作。请刷新核对服务器记录后再继续。", "Write could not be confirmed. Refresh and review server records before continuing."));
+      throw error;
+    } finally {
+      writeGate.current.finish(success);
+      pendingSyncRef.current--;
+      setSyncPending(pendingSyncRef.current);
+    }
+  }
+
+  async function retrySync() {
+    try { await loadAllData(); setReady(true); }
+    catch { setLoadError(t("读取记录失败，当前禁止写入，请重试。", "Records could not be loaded. Writing is paused; retry.")); }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -302,10 +337,16 @@ export default function GoldLedger() {
   useEffect(() => {
     if (!session) {
       setRole(null);
+      setReady(false);
+      setWorkerScope([]);
+      writeGate.current.synchronized = false;
       setAuthChecked(true);
       return;
     }
     let cancelled = false;
+    setReady(false);
+    setAuthChecked(false);
+    writeGate.current.synchronized = false;
     supabase
       .from("profiles")
       .select("role")
@@ -334,6 +375,7 @@ export default function GoldLedger() {
   }
 
   async function handleLogout() {
+    if (pendingSyncRef.current > 0) { setSaveMsg("正在同步，请完成后再退出。"); return; }
     await supabase.auth.signOut();
     setReady(false);
   }
@@ -342,7 +384,7 @@ export default function GoldLedger() {
     const { data: rows, error } = await supabase.rpc("get_ledger_rows", {
       p_keys: [worker],
     });
-    if (error) return;
+    if (error) { writeGate.current.failed = true; setLoadError("读取记录失败，已暂停写入，请刷新。"); throw error; }
     const row = (rows || [])[0];
     setData((d) => ({
       ...d,
@@ -352,8 +394,10 @@ export default function GoldLedger() {
 
   // silent=true 是后台自动刷新：不动输入框里的阈值草稿；
   // 如果拉取期间本地刚好有新的改动，就丢掉这次结果，免得把刚记的那条冲掉
-  async function loadAllData({ silent = false } = {}) {
+  async function loadAllData({ silent = false, ownWrite = false } = {}) {
     const startMutation = mutationRef.current;
+    if (pendingSyncRef.current > (ownWrite ? 1 : 0)) return;
+    try {
     const { data: rows, error } = await supabase.rpc("get_ledger_rows", {
       p_keys: WORKERS,
     });
@@ -372,13 +416,27 @@ export default function GoldLedger() {
     });
     if (transErr) throw transErr;
     const nextTransfers = { ...emptyTransferData(), ...(transRaw || {}) };
-    if (silent && (mutationRef.current !== startMutation || pendingSyncRef.current > 0)) return;
+    const { data: scope, error: scopeError } = await supabase.rpc("ledger_get_worker_scope");
+    if (scopeError) throw scopeError;
+    if (mutationRef.current !== startMutation || pendingSyncRef.current > (ownWrite ? 1 : 0)) return;
+    setWorkerScope(scope || []);
+    const permitted = WORKERS.filter(w => (scope || []).includes(w));
+    setActiveWorker(w => permitted.includes(w) ? w : permitted[0] || "");
+    setShipFrom(w => permitted.includes(w) ? w : SHIP_WORKERS.find(w => permitted.includes(w)) || "");
     setData(next);
     setShipmentData(nextShipments);
     setTransferData(nextTransfers);
     if (!silent) {
       setThresholdDraft(String(nextTransfers.threshold ?? 0.05));
       setShipThresholdDraft(String(nextShipments.threshold ?? 0.05));
+    }
+    writeGate.current.recovered();
+    setLoadError("");
+    setLastSynced(new Date());
+    } catch (error) {
+      writeGate.current.failed = true;
+      setLoadError(t("服务器记录未同步，已暂停写入，请重试。", "Server records are not synchronized. Writing is paused; retry."));
+      throw error;
     }
   }
   loadAllDataRef.current = loadAllData;
@@ -392,8 +450,8 @@ export default function GoldLedger() {
       })
       .catch(() => {
         if (!cancelled) {
-          setLoadError("读取记录失败（检查网络或权限），先从空白开始，保存时会重试。");
-          setReady(true);
+          setLoadError("读取记录失败，当前禁止写入。请检查网络后重试。");
+          setReady(false);
         }
       });
     return () => {
@@ -448,7 +506,7 @@ export default function GoldLedger() {
     const v = parseFloat(boxWeightDraft);
     if (Number.isNaN(v) || v < 0) return;
     try {
-      const { error } = await supabase.rpc("update_special_field", {
+      const { error } = await ledgerWrite("update_special_field", {
         p_key: activeWorker,
         p_field: "boxWeight",
         p_value: v,
@@ -486,7 +544,8 @@ export default function GoldLedger() {
       : null;
   const lossOver = loss !== null && Math.abs(loss) > LOSS_THRESHOLD;
 
-  function addRow() {
+  async function addRow() {
+    if (!writeGate.current.canWrite() || !editableWorkers.includes(activeWorker)) return;
     const amt = parseFloat(amountInput);
     if (!descInput.trim()) {
       setRowError(t("请填写描述", "Please enter a description"));
@@ -500,8 +559,8 @@ export default function GoldLedger() {
       setRowError(t("请选择去向/来源", "Please choose a destination/source"));
       return;
     }
-    const item = { id: String(Date.now() + Math.random()), desc: descInput.trim(), amount: amt, dest: destInput };
-    addDraftItemLocal(activeWorker, dateInput, item);
+    const item = { id: crypto.randomUUID(), desc: descInput.trim(), amount: amt, dest: destInput };
+    if (!await addDraftItemLocal(activeWorker, dateInput, item)) return;
     setDescInput("");
     setAmountInput("");
     setDestInput("");
@@ -513,76 +572,39 @@ export default function GoldLedger() {
   }
 
   // 维修快捷录入：描述固定"维修"，去向/来源在 JJ / PD门市 之间选
-  function addRepairRow() {
+  async function addRepairRow() {
+    if (!writeGate.current.canWrite() || !editableWorkers.includes(activeWorker)) return;
     const amt = parseFloat(repairAmount);
     if (repairAmount === "" || Number.isNaN(amt) || amt === 0) {
       setRepairError(t("请填写有效的加减数量（不能为0）", "Please enter a valid amount (can't be 0)"));
       return;
     }
     const item = {
-      id: String(Date.now() + Math.random()),
+      id: crypto.randomUUID(),
       desc: t("维修", "Repair"),
       amount: amt,
       dest: repairDest,
     };
-    addDraftItemLocal(activeWorker, dateInput, item);
+    if (!await addDraftItemLocal(activeWorker, dateInput, item)) return;
     setRepairAmount("");
     setRepairError("");
   }
 
-  // 加一条暂存流水（本地立即显示 + 后台走安全通道同步，user也能用）
-  function addDraftItemLocal(worker, date, item) {
-    setData((d) => {
-      const workerData = d[worker] || emptyWorkerData();
-      const list = (workerData.drafts && workerData.drafts[date]) || [];
-      const nextDrafts = { ...(workerData.drafts || {}), [date]: [...list, item] };
-      return { ...d, [worker]: { ...workerData, drafts: nextDrafts } };
-    });
-    mutationRef.current += 1;
-    pendingSyncRef.current += 1;
-    supabase
-      .rpc("upsert_draft_item", { p_worker: worker, p_date: date, p_item: item })
-      .then(({ error }) => {
-        if (error) setSaveMsg("同步失败，检查网络（这条记录可能还没同步到其他设备）");
-      })
-      .finally(() => {
-        pendingSyncRef.current -= 1;
-      });
+  async function addDraftItemLocal(worker, date, item) {
+    if (!editableWorkers.includes(worker)) return false;
+    try {
+      await ledgerWrite("upsert_draft_item", { p_worker: worker, p_date: date, p_item: item });
+      return true;
+    } catch { setSaveMsg("记录未确认，请刷新核对服务器后再继续。"); return false; }
   }
 
-  // 删一条暂存流水
-  function removeDraftItemLocal(worker, date, itemId) {
-    setData((d) => {
-      const workerData = d[worker] || emptyWorkerData();
-      const list = (workerData.drafts && workerData.drafts[date]) || [];
-      const filtered = list.filter((t) => t.id !== itemId);
-      const nextDrafts = { ...(workerData.drafts || {}) };
-      if (filtered.length === 0) delete nextDrafts[date];
-      else nextDrafts[date] = filtered;
-      return { ...d, [worker]: { ...workerData, drafts: nextDrafts } };
-    });
-    mutationRef.current += 1;
-    pendingSyncRef.current += 1;
-    supabase
-      .rpc("remove_draft_item", { p_worker: worker, p_date: date, p_item_id: String(itemId) })
-      .then(({ error }) => {
-        if (error) setSaveMsg("同步失败，检查网络（这条记录可能还没同步到其他设备）");
-      })
-      .finally(() => {
-        pendingSyncRef.current -= 1;
-      });
+  async function removeDraftItemLocal(worker, date, itemId) {
+    if (!editableWorkers.includes(worker)) return;
+    try {
+      await ledgerWrite("remove_draft_item", { p_worker: worker, p_date: date, p_item_id: String(itemId) });
+      await refreshWorkerData(worker);
+    } catch { setSaveMsg("删除未确认，请刷新核对服务器后再继续。"); }
   }
-
-  // 整包写回只给 admin 用（撤销、编辑历史、导出后清空、改阈值等）
-  async function persistRow(key, nextData) {
-    if (!isAdmin) throw new Error("not authorized");
-    const { error } = await supabase.rpc("admin_upsert_row", {
-      p_worker: key,
-      p_data: nextData,
-    });
-    if (error) throw error;
-  }
-  const persistWorker = persistRow;
 
   // 整行覆盖前先拉服务器上最新的那一行，再在它的基础上改，
   // 避免用页面里已经过期的数据，把别人刚记的流水/配对冲掉
@@ -601,7 +623,7 @@ export default function GoldLedger() {
 
   async function refreshSpecialData(key, setter, emptyFn) {
     const { data: raw, error } = await supabase.rpc("get_special_row", { p_key: key });
-    if (error) return;
+    if (error) { writeGate.current.failed = true; setLoadError("读取记录失败，已暂停写入，请刷新。"); throw error; }
     setter({ ...emptyFn(), ...(raw || {}) });
   }
 
@@ -620,7 +642,7 @@ export default function GoldLedger() {
     }
     setShipItems((list) => [
       ...list,
-      { id: Date.now() + Math.random(), category: cat, weight: w },
+      { id: crypto.randomUUID(), category: cat, weight: w },
     ]);
     setShipCategoryCustom("");
     setShipWeight("");
@@ -651,16 +673,15 @@ export default function GoldLedger() {
     const t = parseFloat(shipThresholdDraft);
     if (Number.isNaN(t) || t < 0) return;
     try {
-      const fresh = await fetchRowFresh(SPECIAL_KEYS.SHIPMENTS);
-      const nextData = { ...fresh, threshold: t };
-      await persistRow(SPECIAL_KEYS.SHIPMENTS, nextData);
-      setShipmentData(nextData);
+      await ledgerWrite("update_special_field", { p_key: SPECIAL_KEYS.SHIPMENTS, p_field: "threshold", p_value: t });
+      await refreshSpecialData(SPECIAL_KEYS.SHIPMENTS, setShipmentData, emptyShipmentData);
     } catch {
       setShipMsg("阈值更新失败，检查网络后重试");
     }
   }
 
   async function saveShipment() {
+    if (!writeGate.current.canWrite() || !editableShipWorkers.includes(shipFrom)) return;
     setShipMsg("");
     if (!canSaveShipment()) {
       setShipMsg("GOLDBAR 或 GOLDBEAN 的实重跟小计差超过0.03g，请先点下面的确认按钮再保存");
@@ -669,7 +690,7 @@ export default function GoldLedger() {
     const items = [...shipItems];
     if (goldbarState.finalWeight > 0) {
       items.push({
-        id: Date.now() + Math.random(),
+        id: crypto.randomUUID(),
         category: "GOLDBAR",
         weight: Math.round(goldbarState.finalWeight * 100) / 100,
         breakdown: denomBreakdown(goldbarQty, DENOMINATIONS_GOLDBAR),
@@ -677,7 +698,7 @@ export default function GoldLedger() {
     }
     if (goldbeanState.finalWeight > 0) {
       items.push({
-        id: Date.now() + Math.random(),
+        id: crypto.randomUUID(),
         category: "GOLDBEAN",
         weight: Math.round(goldbeanState.finalWeight * 100) / 100,
         breakdown: denomBreakdown(goldbeanQty, DENOMINATIONS_GOLDBEAN),
@@ -693,9 +714,9 @@ export default function GoldLedger() {
     }
     setShipSaving(true);
     const sentTotal = items.reduce((s, i) => s + i.weight, 0);
-    const sentItemId = String(Date.now() + Math.random());
+    const sentItemId = crypto.randomUUID();
     const record = {
-      id: String(Date.now() + Math.random()),
+      id: crypto.randomUUID(),
       serial: "",
       fromWorker: shipFrom,
       toWorker: SHIP_TO,
@@ -712,18 +733,12 @@ export default function GoldLedger() {
     };
     const categoryList = [...new Set(items.map((i) => i.category))].join("、");
     const autoDesc = `${shipFlowDesc.trim()} ${categoryList}`.trim();
-    addDraftItemLocal(shipFrom, shipDate, {
-      id: sentItemId,
-      desc: autoDesc,
-      amount: -sentTotal,
-      dest: SHIP_TO,
-    });
     try {
-      const { error } = await supabase.rpc("append_special_record", {
-        p_key: SPECIAL_KEYS.SHIPMENTS,
-        p_record: record,
+      const { error } = await ledgerWrite("shipment_create_with_flow", {
+        p_record: record, p_flow_description: autoDesc,
       });
       if (error) throw error;
+      await refreshWorkerData(shipFrom);
       await refreshSpecialData(SPECIAL_KEYS.SHIPMENTS, setShipmentData, emptyShipmentData);
       setShipItems([]);
       setGoldbarQty({});
@@ -765,7 +780,7 @@ export default function GoldLedger() {
     }
     setShipConfirmSaving(true);
     try {
-      const { error } = await supabase.rpc("update_special_record", {
+      const { error } = await ledgerWrite("update_special_record", {
         p_key: SPECIAL_KEYS.SHIPMENTS,
         p_record_id: record.id,
         p_patch: {
@@ -786,25 +801,14 @@ export default function GoldLedger() {
     }
   }
 
-  function deleteShipmentRecord(record) {
-    if (!isAdmin) return;
-    const msg =
-      record.status === "pending"
-        ? "确定取消这笔待确认的出货？（已写进流水的那条也会撤销）"
-        : "确定删除这条已确认的出货记录？";
-    if (!window.confirm(msg)) return;
-    if (record.sentItemId) {
-      removeDraftItemLocal(record.fromWorker, record.date, record.sentItemId);
-    }
-    supabase
-      .rpc("admin_delete_special_record", { p_key: SPECIAL_KEYS.SHIPMENTS, p_record_id: record.id })
-      .then(({ error }) => {
-        if (error) {
-          setShipMsg("删除失败，检查网络后重试");
-        } else {
-          refreshSpecialData(SPECIAL_KEYS.SHIPMENTS, setShipmentData, emptyShipmentData);
-        }
-      });
+  async function deleteShipmentRecord(record) {
+    if (!isAdmin || !writeGate.current.canWrite()) return;
+    if (!window.confirm("确定撤销这条出货及其关联流水？操作会留档。")) return;
+    try {
+      await ledgerWrite("shipment_delete_with_flow", { p_record_id: record.id, p_reason: "Cancelled by administrator from shipment page" });
+      await refreshWorkerData(record.fromWorker);
+      await refreshSpecialData(SPECIAL_KEYS.SHIPMENTS, setShipmentData, emptyShipmentData);
+    } catch { setShipMsg("取消失败，流水可能已经归档；请管理员复核。记录未被部分删除。"); }
   }
 
   async function loadAdminUsers() {
@@ -943,10 +947,8 @@ export default function GoldLedger() {
     const t = parseFloat(thresholdDraft);
     if (Number.isNaN(t) || t < 0) return;
     try {
-      const fresh = await fetchRowFresh(SPECIAL_KEYS.TRANSFERS);
-      const nextData = { ...fresh, threshold: t };
-      await persistRow(SPECIAL_KEYS.TRANSFERS, nextData);
-      setTransferData(nextData);
+      await ledgerWrite("update_special_field", { p_key: SPECIAL_KEYS.TRANSFERS, p_field: "threshold", p_value: t });
+      await refreshSpecialData(SPECIAL_KEYS.TRANSFERS, setTransferData, emptyTransferData);
     } catch {
       setMatchMsg("阈值更新失败，检查网络后重试");
     }
@@ -1083,9 +1085,7 @@ export default function GoldLedger() {
 
   // 最近2天未配对统计仅作提醒，绝不阻塞正常录入
   const recentUnmatchedCount = useMemo(() => {
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - 2);
-    const cutoffStr = cutoff.toISOString().slice(0, 10);
+    const cutoffStr = shiftDay(todayStr(), -2);
     return matchableItems.filter((i) => i.date >= cutoffStr).length;
   }, [matchableItems]);
   function itemKey(item) {
@@ -1146,7 +1146,7 @@ export default function GoldLedger() {
       });
       if (previewError) throw previewError;
       if (!preview?.valid) throw new Error(preview?.reason || "invalid_match");
-      const { error } = await supabase.rpc("transfer_apply_match", {
+      const { error } = await ledgerWrite("transfer_apply_match", {
         p_outgoing_ids: outgoingIds, p_incoming_ids: incomingIds, p_source: "manual_ui",
       });
       if (error) throw error;
@@ -1181,15 +1181,14 @@ export default function GoldLedger() {
       )
     )
       return;
-    supabase
-      .rpc("transfer_undo_match", { p_match_id: String(record.id), p_reason: "Cancelled from manual UI" })
+    ledgerWrite("transfer_undo_match", { p_match_id: String(record.id), p_reason: "Cancelled from manual UI" })
       .then(({ error }) => {
         if (!error) {
           refreshSpecialData(SPECIAL_KEYS.TRANSFERS, setTransferData, emptyTransferData);
         } else {
           setMatchMsg(t("取消配对失败，检查网络后重试", "Failed to unpair, check your connection and retry"));
         }
-      });
+      }).catch(() => setMatchMsg(t("取消配对未确认，请刷新后复核。", "Unpair could not be confirmed. Refresh and review.")));
   }
 
   // 直接删掉待配对列表里的这条流水记录本身（不只是从配对列表移除，
@@ -1208,6 +1207,7 @@ export default function GoldLedger() {
   }
 
   async function saveDay() {
+    if (!writeGate.current.canWrite()) { setSaveMsg("流水尚未同步，暂时不能结算。"); return; }
     setActualError("");
     setSaveMsg("");
     if (actualInput === "" || Number.isNaN(rawScaleNum)) {
@@ -1216,7 +1216,7 @@ export default function GoldLedger() {
     }
     setSaving(true);
     try {
-      const { error } = await supabase.rpc("save_day", {
+      const { error } = await ledgerWrite("save_day", {
         p_worker: activeWorker,
         p_date: dateInput,
         p_actual: actualNum,
@@ -1239,21 +1239,11 @@ export default function GoldLedger() {
     if (cur.history.length === 0) return;
     setUndoing(true);
     try {
-      // 用服务器上最新的数据来撤销，并确认要撤销的还是管理员刚才看到的那一天
-      const fresh = await fetchRowFresh(activeWorker);
-      const shownLast = cur.history[cur.history.length - 1];
-      const freshLast = fresh.history[fresh.history.length - 1];
-      if (!freshLast || freshLast.date !== shownLast.date) {
-        setData((d) => ({ ...d, [activeWorker]: fresh }));
-        setSaveMsg("这条账刚被别人更新过，已刷新，请确认最新一天后再撤销");
-        return;
-      }
-      const newHistory = recomputeChain(fresh.history.slice(0, -1));
-      const prevWeight =
-        newHistory.length > 0 ? newHistory[newHistory.length - 1].actual : null;
-      const nextWorkerData = { ...fresh, lastWeight: prevWeight, history: newHistory };
-      await persistWorker(activeWorker, nextWorkerData);
-      setData((d) => ({ ...d, [activeWorker]: nextWorkerData }));
+      await ledgerWrite("ledger_undo_last_day", {
+        p_worker: activeWorker, p_expected_record: cur.history[cur.history.length - 1],
+        p_reason: "Administrator undid the last day; flows returned to draft",
+      });
+      await refreshWorkerData(activeWorker);
       setSaveMsg("已撤销最近一天的记录");
     } catch {
       setSaveMsg("撤销失败，检查网络后重试");
@@ -1307,7 +1297,7 @@ export default function GoldLedger() {
     }
     setEditTransactions((list) => [
       ...list,
-      { id: Date.now() + Math.random(), desc: detailDesc.trim(), amount: amt, dest: detailDest },
+      { id: crypto.randomUUID(), desc: detailDesc.trim(), amount: amt, dest: detailDest },
     ]);
     setDetailDesc("");
     setDetailAmount("");
@@ -1329,7 +1319,7 @@ export default function GoldLedger() {
     setEditTransactions((list) => [
       ...list,
       {
-        id: Date.now() + Math.random(),
+        id: crypto.randomUUID(),
         desc: t("维修", "Repair"),
         amount: amt,
         dest: detailRepairDest,
@@ -1340,7 +1330,7 @@ export default function GoldLedger() {
   }
 
   async function saveDetailEdit() {
-    if (!showDetail) return;
+    if (!showDetail || !writeGate.current.canWrite() || !editableWorkers.includes(showDetail.worker)) return;
     const { worker, index } = showDetail;
     const record = data[worker].history[index];
     if (record.exported) return;
@@ -1355,7 +1345,7 @@ export default function GoldLedger() {
     }
     setDetailSaving(true);
     try {
-      const { error } = await supabase.rpc("edit_history_record", {
+      const { error } = await ledgerWrite("edit_history_record", {
         p_worker: worker,
         p_old_date: record.date,
         p_new_date: editDate,
@@ -1394,19 +1384,20 @@ export default function GoldLedger() {
   }, [data]);
 
   async function handleExport() {
+    if (!isAdmin || !writeGate.current.canWrite()) return;
     setExporting(true);
     setExportMsg("");
     try {
       // 按日期分组，收集所有还没导出过的记录
       const byDate = new Map(); // date -> { worker: record }
-      const keys = new Set();
+      const keys = [];
       let totalDays = 0;
       let totalLines = 0;
       for (const w of WORKERS) {
         const hist = data[w]?.history || [];
         hist.forEach((r) => {
           if (r.exported) return;
-          keys.add(`${w}__${r.date}`);
+          keys.push({ worker: w, date: r.date, record: structuredClone(r) });
           if (!byDate.has(r.date)) byDate.set(r.date, {});
           byDate.get(r.date)[w] = r;
           totalDays += 1;
@@ -1545,31 +1536,13 @@ export default function GoldLedger() {
     if (!pendingExportKeys) return;
     setClearing(true);
     try {
-      const nextDataLocal = { ...data };
-      for (const w of WORKERS) {
-        // 每条账都先拉最新的再改，不用页面里可能已过期的数据整行覆盖
-        const fresh = await fetchRowFresh(w);
-        const hist = fresh.history || [];
-        let changed = false;
-        const newHist = hist.map((r) => {
-          if (!r.exported && pendingExportKeys.has(`${w}__${r.date}`)) {
-            changed = true;
-            return { ...r, exported: true, transactions: [] };
-          }
-          return r;
-        });
-        if (changed) {
-          const nextWorkerData = { ...fresh, history: newHist };
-          await persistWorker(w, nextWorkerData);
-          nextDataLocal[w] = nextWorkerData;
-        }
-      }
-      setData(nextDataLocal);
+      const { data: result } = await ledgerWrite("ledger_archive_batch", { p_records: pendingExportKeys });
+      await loadAllData();
       setPendingExportKeys(null);
       setConfirmClear(false);
-      setExportMsg("已清空这批流水明细，每日汇总和累计损耗都还保留着。");
+      setExportMsg("已归档 " + result.archived_days + " 天；保留 " + result.retained.length + " 天待配对、异常或出货原始流水。汇总不变。");
     } catch {
-      setExportMsg("清空失败，检查网络后重试（已下载的Excel文件不受影响）");
+      setExportMsg("归档未执行：记录可能在导出后有变动，请刷新并重新导出。整批操作不会部分成功。");
     } finally {
       setClearing(false);
     }
@@ -1639,8 +1612,11 @@ export default function GoldLedger() {
   if (!ready) {
     return (
       <div className="min-h-[300px] flex items-center justify-center text-stone-400 bg-stone-950 rounded-2xl">
-        <Loader2 className="w-5 h-5 animate-spin mr-2" />
-        {t("正在加载记录…", "Loading records…")}
+        <div>
+          <p>{loadError || t("正在加载记录…", "Loading records…")}</p>
+          {loadError && <button onClick={retrySync} className="mt-3 border rounded px-4 py-2">{t("重试读取", "Retry loading")}</button>}
+          <button onClick={handleLogout} className="ml-3">{t("退出", "Sign out")}</button>
+        </div>
       </div>
     );
   }
@@ -1686,6 +1662,7 @@ export default function GoldLedger() {
         {loadError && (
           <div className="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-1.5">
             {loadError}
+            <button onClick={retrySync} className="ml-3 underline">{t("刷新核对", "Refresh and review")}</button>
           </div>
         )}
         <div className="flex items-center justify-between md:justify-end gap-3">
@@ -1717,10 +1694,15 @@ export default function GoldLedger() {
         </div>
       </div>
 
+      <p role="status" className="text-xs text-stone-400 mb-3">
+        {syncPending > 0 ? t("正在同步，暂时不能结算或修改…", "Synchronizing; settlement and edits are paused…") :
+          lastSynced ? t("最后完整同步：", "Last full sync: ") + lastSynced.toLocaleTimeString("en-GB", { timeZone: "Asia/Kuala_Lumpur" }) : ""}
+      </p>
+      <fieldset disabled={writeBlocked} className="min-w-0">
       {!isAdmin && (
         <p className="text-xs text-stone-600 mb-4">
           {t(
-            "你是普通账号，只能看到最近3天的记录，也只能修改这最近3天内的记录；导出、撤销这些功能只有管理员能用。",
+            "你只能录入和修改已分配部门最近3天的记录；转手配对和解除异常由管理员 / AI 每周处理。",
             "You have a standard account: only the last 3 days are visible, and you can only edit records within those 3 days. Export and undo remain admin-only."
           )}
         </p>
@@ -1731,7 +1713,7 @@ export default function GoldLedger() {
           { key: "summary", label: t("总览", "Overview"), icon: LayoutDashboard },
           { key: "workers", label: t("对账", "Reconcile"), icon: Scale },
           { key: "shipments", label: t("出货记录", "Shipments"), icon: Truck },
-          { key: "transfers", label: t("转手核对", "Transfers"), icon: ArrowLeftRight },
+          ...(isAdmin ? [{ key: "transfers", label: t("转手核对", "Transfers"), icon: ArrowLeftRight }] : []),
           ...(isAdmin ? [{ key: "admin", label: t("账号管理", "Accounts"), icon: Users }] : []),
         ].map((v) => (
           <button
@@ -1750,7 +1732,8 @@ export default function GoldLedger() {
         ))}
       </div>
 
-      <TransferIssues worker={activeWorker} lang={lang} />
+      <TransferIssues worker={view === "transfers" && isAdmin ? null : activeWorker} lang={lang} pinned={view === "transfers"} />
+      {!isAdmin && editableWorkers.length === 0 && <p className="text-rose-400">账号尚未分配录入部门，请管理员设置。</p>}
 
       {view === "summary" && (
         <>
@@ -2122,7 +2105,7 @@ export default function GoldLedger() {
         <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={handleExport}
-            disabled={exporting}
+            disabled={exporting || !isAdmin || writeBlocked}
             className="flex items-center gap-2 bg-stone-800 hover:bg-stone-700 border border-stone-700 disabled:opacity-60 rounded-lg px-4 py-2 text-sm text-stone-100"
           >
             {exporting ? (
@@ -2168,7 +2151,7 @@ export default function GoldLedger() {
       </div>
 
       <div className="flex gap-2 mb-6 border-b border-stone-800 pb-3 overflow-x-auto -mx-5 px-5 md:mx-0 md:px-0 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        {WORKERS.map((w) => (
+        {editableWorkers.map((w) => (
           <button
             key={w}
             onClick={() => setActiveWorker(w)}
@@ -2487,7 +2470,7 @@ export default function GoldLedger() {
 
         <button
           onClick={saveDay}
-          disabled={saving}
+          disabled={saving || writeBlocked || !editableWorkers.includes(activeWorker)}
           className="mt-4 w-full md:w-auto flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-stone-950 font-medium rounded-lg px-5 py-2.5 text-sm"
         >
           {saving ? (
@@ -2835,7 +2818,7 @@ export default function GoldLedger() {
                 )}
                 <button
                   onClick={saveDetailEdit}
-                  disabled={detailSaving}
+                  disabled={detailSaving || writeBlocked || !editableWorkers.includes(showDetail?.worker)}
                   className="w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-stone-950 font-medium rounded-lg px-5 py-2.5 text-sm"
                 >
                   {detailSaving ? (
@@ -2867,7 +2850,7 @@ export default function GoldLedger() {
                   onChange={(e) => setShipFrom(e.target.value)}
                   className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm text-stone-100 focus:outline-none focus:border-amber-500"
                 >
-                  {SHIP_WORKERS.map((w) => (
+                  {editableShipWorkers.map((w) => (
                     <option key={w} value={w}>
                       {w}
                     </option>
@@ -3115,7 +3098,7 @@ export default function GoldLedger() {
 
           <button
             onClick={saveShipment}
-            disabled={shipSaving}
+            disabled={shipSaving || writeBlocked || !editableShipWorkers.includes(shipFrom)}
             className="mb-2 w-full md:w-auto flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-stone-950 font-medium rounded-lg px-5 py-2.5 text-sm"
           >
             {shipSaving ? (
@@ -3785,6 +3768,7 @@ export default function GoldLedger() {
           </p>
         </div>
       )}
+      </fieldset>
     </div>
   );
 }
