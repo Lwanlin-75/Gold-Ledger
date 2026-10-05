@@ -1,0 +1,1 @@
+Run 20261005_transfer_maintenance.sql, then 20261005_transfer_issues.sql against the inspected production schema. Do not run supabase_setup.sql. See ../../TRANSFER_MAINTENANCE.md for deployment, permissions, weekly maintenance, and rollback.
