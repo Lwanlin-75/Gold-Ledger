@@ -1,5 +1,10 @@
 -- First deploy the previous frontend. Keep all audit tables and current ledger data.
 begin;
+do $$begin
+  if exists(select 1 from pg_trigger where tgname='ledger_mutation_audit' and tgrelid='public.gold_ledger'::regclass) then
+    raise exception 'rollback_20261006_ledger_safety_first';
+  end if;
+end $$;
 set local lock_timeout='10s';
 lock table public.gold_ledger in share row exclusive mode;
 drop trigger transfer_maintenance_ledger_guard on public.gold_ledger;
