@@ -1,0 +1,1 @@
+Run npm test from the repository root. Tests use isolated synthetic data in PGlite and the inspected production function definitions. Real company data must never be committed. See ../TRANSFER_MAINTENANCE.md for maintenance and concurrency validation.
