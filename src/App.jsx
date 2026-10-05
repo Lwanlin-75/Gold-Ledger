@@ -466,6 +466,7 @@ export default function GoldLedger() {
     function tick() {
       if (document.visibilityState !== "visible") return;
       if (pendingSyncRef.current > 0) return;
+      if (writeGate.current.failed) return; // Uncertain writes require an explicit refresh/review.
       const now = Date.now();
       if (now - lastAutoRefreshRef.current < 10000) return;
       lastAutoRefreshRef.current = now;
