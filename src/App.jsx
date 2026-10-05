@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import * as XLSX from "xlsx";
 import { supabase } from "./supabaseClient.js";
+import TransferIssues from "./TransferIssues.jsx";
 import {
   Scale,
   Plus,
@@ -499,15 +500,6 @@ export default function GoldLedger() {
       setRowError(t("请选择去向/来源", "Please choose a destination/source"));
       return;
     }
-    if (blockedByUnmatchedLimit(amt, destInput)) {
-      setRowError(
-        t(
-          `最近2天有 ${recentUnmatchedCount} 笔还没配对（超过${UNMATCHED_LIMIT}笔），请先去"转手核对"把配对补上，才能继续记流水`,
-          `${recentUnmatchedCount} unpaired entries in the last 2 days (over the limit of ${UNMATCHED_LIMIT}). Please pair them in "Transfers" before adding more flow entries.`
-        )
-      );
-      return;
-    }
     const item = { id: String(Date.now() + Math.random()), desc: descInput.trim(), amount: amt, dest: destInput };
     addDraftItemLocal(activeWorker, dateInput, item);
     setDescInput("");
@@ -525,15 +517,6 @@ export default function GoldLedger() {
     const amt = parseFloat(repairAmount);
     if (repairAmount === "" || Number.isNaN(amt) || amt === 0) {
       setRepairError(t("请填写有效的加减数量（不能为0）", "Please enter a valid amount (can't be 0)"));
-      return;
-    }
-    if (blockedByUnmatchedLimit(amt, repairDest)) {
-      setRepairError(
-        t(
-          `最近2天有 ${recentUnmatchedCount} 笔还没配对（超过${UNMATCHED_LIMIT}笔），请先去"转手核对"把配对补上，才能继续记流水`,
-          `${recentUnmatchedCount} unpaired entries in the last 2 days (over the limit of ${UNMATCHED_LIMIT}). Please pair them in "Transfers" before adding more flow entries.`
-        )
-      );
       return;
     }
     const item = {
@@ -1098,21 +1081,13 @@ export default function GoldLedger() {
     return items;
   }, [data, matchedItemIds]);
 
-  // 最近2天内还没配对的记录数——超过5笔就先不给记新流水，逼着及时去配对
+  // 最近2天未配对统计仅作提醒，绝不阻塞正常录入
   const recentUnmatchedCount = useMemo(() => {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - 2);
     const cutoffStr = cutoff.toISOString().slice(0, 10);
     return matchableItems.filter((i) => i.date >= cutoffStr).length;
   }, [matchableItems]);
-  const UNMATCHED_LIMIT = 5;
-  // 超限时只放行"接收方"那一侧的转手记录（金额为正、来源是另一位 worker）。
-  // 这些正是配对需要的另一半；如果连它们也拦住，没人能补记，就永远配不上、整个流水卡死。
-  function blockedByUnmatchedLimit(amount, dest) {
-    if (recentUnmatchedCount <= UNMATCHED_LIMIT) return false;
-    return !(WORKERS.includes(dest) && amount > 0);
-  }
-
   function itemKey(item) {
     return `${item.worker}|${item.date}|${item.id}`;
   }
@@ -1163,73 +1138,37 @@ export default function GoldLedger() {
     if (selectedOutgoingList.length === 0 || selectedIncomingList.length === 0) return;
     setMatchSaving(true);
     setMatchMsg("");
-    // 提交前先看一眼服务器：这几条是不是刚被别人配对走了（两个账号同时配对同一批记录会重复）
     try {
-      const { data: rawT, error: tErr } = await supabase.rpc("get_special_row", {
-        p_key: SPECIAL_KEYS.TRANSFERS,
+      const outgoingIds = selectedOutgoingList.map((i) => String(i.id));
+      const incomingIds = selectedIncomingList.map((i) => String(i.id));
+      const { data: preview, error: previewError } = await supabase.rpc("transfer_preview_match", {
+        p_outgoing_ids: outgoingIds, p_incoming_ids: incomingIds,
       });
-      if (!tErr) {
-        const fresh = { ...emptyTransferData(), ...(rawT || {}) };
-        const taken = new Set();
-        for (const r of fresh.history.filter((x) => x.kind === "match")) {
-          if (r.outgoing) r.outgoing.forEach((i) => taken.add(i.itemId));
-          else if (r.itemIdA) taken.add(r.itemIdA);
-          if (r.incoming) r.incoming.forEach((i) => taken.add(i.itemId));
-          else if (r.itemIdB) taken.add(r.itemIdB);
-        }
-        const clash = [...selectedOutgoingList, ...selectedIncomingList].some((i) => taken.has(i.id));
-        if (clash) {
-          setTransferData(fresh);
-          setSelectedOutgoingKeys(new Set());
-          setSelectedIncomingKeys(new Set());
-          setMatchMsg(
-            t(
-              "其中有记录刚刚被别人配对了，已刷新，请重新选择",
-              "Some of these entries were just paired by someone else. Refreshed — please select again."
-            )
-          );
-          setMatchSaving(false);
-          return;
-        }
-      }
-    } catch {
-      // 校验本身失败就照常配对
+      if (previewError) throw previewError;
+      if (!preview?.valid) throw new Error(preview?.reason || "invalid_match");
+      const { error } = await supabase.rpc("transfer_apply_match", {
+        p_outgoing_ids: outgoingIds, p_incoming_ids: incomingIds, p_source: "manual_ui",
+      });
+      if (error) throw error;
+      await refreshSpecialData(SPECIAL_KEYS.TRANSFERS, setTransferData, emptyTransferData);
+      setSelectedOutgoingKeys(new Set());
+      setSelectedIncomingKeys(new Set());
+      setMatchMsg(t("配对成功", "Paired"));
+    } catch (error) {
+      const reason = error.message || "";
+      const messages = {
+        item_already_matched: t("其中有记录已经配对，请刷新后重新选择", "Some entries are already paired. Refresh and select again."),
+        worker_pair_mismatch: t("送出和接收必须属于同一组 Worker，且去向/来源互相对应", "Select one worker pair with reciprocal destination/source."),
+        date_range_exceeded: t("所选记录日期跨度超过7天，或包含未来日期", "Selected entries span more than 7 days or include a future date."),
+        item_not_found: t("记录已变动或不存在，请刷新后重新选择", "Entries have changed or no longer exist. Refresh and select again."),
+        admin_required: t("只有管理员可以配对", "Only admins can pair entries."),
+        weight_mismatch_requires_investigation: t("重量差超过0.20g，请建立异常并调查后复核", "Difference exceeds 0.20g. Create an issue and investigate before review."),
+        item_has_open_issue: t("所选流水有待处理异常，请管理员复核异常后再配对", "Selected entries have open issues. Administrator review is required."),
+      };
+      setMatchMsg(messages[reason] || t("配对失败，检查网络或选择的记录后重试", "Pairing failed. Check your connection and selection."));
+    } finally {
+      setMatchSaving(false);
     }
-    const record = {
-      id: String(Date.now() + Math.random()),
-      kind: "match",
-      outgoing: selectedOutgoingList.map((i) => ({
-        worker: i.worker,
-        date: i.date,
-        desc: i.desc,
-        amount: i.amount,
-        itemId: i.id,
-      })),
-      incoming: selectedIncomingList.map((i) => ({
-        worker: i.worker,
-        date: i.date,
-        desc: i.desc,
-        amount: i.amount,
-        itemId: i.id,
-      })),
-      totalOut: selTotalOut,
-      totalIn: selTotalIn,
-      diff: selDiff,
-      matchedAt: todayStr(),
-    };
-    supabase
-      .rpc("append_special_record", { p_key: SPECIAL_KEYS.TRANSFERS, p_record: record })
-      .then(({ error }) => {
-        if (error) {
-          setMatchMsg(t("配对失败，检查网络后重试", "Pairing failed, check your connection and retry"));
-        } else {
-          refreshSpecialData(SPECIAL_KEYS.TRANSFERS, setTransferData, emptyTransferData);
-          setSelectedOutgoingKeys(new Set());
-          setSelectedIncomingKeys(new Set());
-          setMatchMsg(t("配对成功", "Paired"));
-        }
-      })
-      .finally(() => setMatchSaving(false));
   }
 
   function unmatch(record) {
@@ -1243,7 +1182,7 @@ export default function GoldLedger() {
     )
       return;
     supabase
-      .rpc("delete_match_record", { p_key: SPECIAL_KEYS.TRANSFERS, p_record_id: record.id })
+      .rpc("transfer_undo_match", { p_match_id: String(record.id), p_reason: "Cancelled from manual UI" })
       .then(({ error }) => {
         if (!error) {
           refreshSpecialData(SPECIAL_KEYS.TRANSFERS, setTransferData, emptyTransferData);
@@ -1364,15 +1303,6 @@ export default function GoldLedger() {
     }
     if (!detailDest) {
       setDetailRowError(t("请选择去向/来源", "Please choose a destination/source"));
-      return;
-    }
-    if (blockedByUnmatchedLimit(amt, detailDest)) {
-      setDetailRowError(
-        t(
-          `最近2天有 ${recentUnmatchedCount} 笔还没配对（超过${UNMATCHED_LIMIT}笔），请先去"转手核对"把配对补上，才能继续记流水`,
-          `${recentUnmatchedCount} unpaired entries in the last 2 days (over the limit of ${UNMATCHED_LIMIT}). Please pair them in "Transfers" before adding more flow entries.`
-        )
-      );
       return;
     }
     setEditTransactions((list) => [
@@ -1819,6 +1749,8 @@ export default function GoldLedger() {
           </button>
         ))}
       </div>
+
+      <TransferIssues worker={activeWorker} lang={lang} />
 
       {view === "summary" && (
         <>
@@ -2321,12 +2253,12 @@ export default function GoldLedger() {
           {dateInput} {t("流水", "flow")}（{activeWorker}）
         </h2>
 
-        {recentUnmatchedCount > UNMATCHED_LIMIT && (
+        {recentUnmatchedCount > 0 && (
           <div className="bg-rose-500/10 border border-rose-500/40 rounded-lg p-3 mb-3 text-xs text-rose-400 flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 shrink-0" />
             {t(
-              `最近2天有 ${recentUnmatchedCount} 笔转手记录还没配对（超过${UNMATCHED_LIMIT}笔上限）。现在只能先记"收到对方转手"的那一边（金额为正、来源选对方），其它新流水要等配对后才能记，去"转手核对"页配对`,
-              `${recentUnmatchedCount} transfer entries from the last 2 days are still unpaired (over the limit of ${UNMATCHED_LIMIT}). You can still record the receiving side of a transfer (positive amount, source = the other worker); other new entries are blocked until you pair — go to "Transfers".`
+              `最近2天有 ${recentUnmatchedCount} 笔转手记录还没配对，管理员可每周集中处理；正常流水录入不受影响`,
+              `${recentUnmatchedCount} transfer entries from the last 2 days are unpaired. Admins can review them weekly; flow entry remains available.`
             )}
           </div>
         )}
@@ -3446,17 +3378,17 @@ export default function GoldLedger() {
               <div
                 className={
                   "rounded-xl p-3 mb-6 border text-sm flex items-center gap-2 " +
-                  (recentUnmatchedCount > UNMATCHED_LIMIT
+                  (recentUnmatchedCount > 0
                     ? "bg-rose-500/10 border-rose-500/40 text-rose-400"
                     : "bg-stone-900 border-stone-800 text-stone-400")
                 }
               >
-                {recentUnmatchedCount > UNMATCHED_LIMIT && (
+                {recentUnmatchedCount > 0 && (
                   <AlertTriangle className="w-4 h-4 shrink-0" />
                 )}
                 {t(
-                  `最近2天未配对：${recentUnmatchedCount} / ${UNMATCHED_LIMIT}${recentUnmatchedCount > UNMATCHED_LIMIT ? "——已超过限制，只能先记收到对方转手的那一边，其它流水先配对再记" : ""}`,
-                  `Unpaired in the last 2 days: ${recentUnmatchedCount} / ${UNMATCHED_LIMIT}${recentUnmatchedCount > UNMATCHED_LIMIT ? " — over the limit: only the receiving side of a transfer can be recorded until you pair some" : ""}`
+                  `最近2天未配对：${recentUnmatchedCount}——仅作提醒，不限制新增流水`,
+                  `Unpaired in the last 2 days: ${recentUnmatchedCount} — reminder only; new entries remain available`
                 )}
               </div>
 
