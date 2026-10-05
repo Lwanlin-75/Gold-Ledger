@@ -121,3 +121,7 @@ Resolve类型：MATCH_AND_RESOLVE、CORRECTED_AND_MATCHED、RESOLVE_NO_MATCH、K
 `npm install && npm test` 使用隔离的 PGlite PostgreSQL 引擎和检查过的生产函数结构；默认只有合成测试数据。管理员可在本地设置 `TRANSFER_PRODUCTION_FIXTURE` 指向受控数据副本，额外验证迁移不改旧数据及历史重复隔离。测试数据不得入仓库。测试覆盖 6/50/300 未配对不阻塞、日期/Pair/符号校验、组合候选、Preview无写入、重复拒绝、逐组回滚、Undo/Audit、权限、异常强制调查、员工授权、修改历史、Resolve原子性、迟收等待和保留历史回滚。
 
 PGlite 单连接测试不能冒充真实双连接并发测试；真实并发须在隔离 PostgreSQL/Supabase 复刻环境使用两个连接同时对同 item Apply，检查只一组成功、另一组 `item_already_matched` 或唯一冲突，且无半写入。生产无需为测试建立或撤销真实业务 Match。
+
+### 2026-10-05 真实并发验证
+
+在 Supabase 的私有隔离 schema `transfer_rehearsal_20261005` / `transfer_rehearsal_private_20261005` 中复制本次函数，仅使用两笔合成记录。两个 SQL 会话同时 Apply 相同 item，第一会话持锁 20 秒：第一笔成功，第二笔返回 `22023: item_already_matched`。最终检查 Match=1、active members=2、apply audit=1、兼容 UI Match=1、authenticated 无私有 schema USAGE。没有创建/撤销真实流水配对；隔离测试的审计数据保留，schema 不暴露给 REST。
